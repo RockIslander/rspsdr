@@ -1,0 +1,16 @@
+#!/bin/sh
+# The launcher the desktop entry and /usr/bin/rspsdr both use.
+#
+# The module is installed into Debian's own Python path
+# (/usr/lib/python3/dist-packages), which python3 already searches, so nothing
+# has to be added to the environment here -- unlike the per-user install.sh
+# layout, where the application lives outside it and PYTHONPATH is required.
+#
+# PYQTGRAPH_QT_LIB is also set inside the program (it has to be, before
+# pyqtgraph is imported), and Debian ships pyqtgraph built for PyQt5 as well as
+# PyQt6, so setting it here too costs nothing and removes one way to get the
+# wrong Qt.
+PYQTGRAPH_QT_LIB=PyQt6
+export PYQTGRAPH_QT_LIB
+
+exec python3 -m rspsdr "$@"

@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Packaging products.  debian/ itself is part of the source; these are what a
+# build leaves behind.
+dist/
+*.deb
+*.buildinfo
+*.changes
+*.dsc
+*.tar.*
+debian/files
+debian/*.substvars
+debian/.debhelper/
+debian/rspsdr/
+
+# Test and diagnostic output.  The one screenshot the README shows lives in
+# docs/ precisely so that this directory can stay disposable.
+artifacts/
+*.wav

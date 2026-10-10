@@ -1,0 +1,13 @@
+rspsdr (1.0.0) unstable; urgency=medium
+
+  * Initial Debian package.
+  * Live spectrum and rolling waterfall with auto-tracking levels, nine
+    colour maps, 1x-16x zoom and selectable waterfall resolution.
+  * AM, SAM, USB, LSB, CW and NFM demodulation with the passband drawn where
+    the demodulator really puts it.
+  * Audio AGC, squelch, and spectral-subtraction noise reduction.
+  * Tuning, filter width, CW pitch, RF/IF gain, tuner bandwidth and FFT size
+    controls, memory channels, band jumping and presets.
+  * Headless modes: --check, --selftest, --wav, --memories, --screenshot.
+
+ -- RockIslander <174265838+RockIslander@users.noreply.github.com>  Sat, 10 Oct 2026 15:03:47 -0230

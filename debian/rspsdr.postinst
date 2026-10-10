@@ -1,0 +1,17 @@
+#!/bin/sh
+# Refresh the shared caches the desktop entry and the icon live in, so the menu
+# item appears straight away instead of at the next login.  Both commands are
+# optional: a machine with no desktop environment simply does not have them,
+# which is not an error.
+set -e
+
+if [ "$1" = "configure" ]; then
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database -q /usr/share/applications || true
+    fi
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        gtk-update-icon-cache -q -t /usr/share/icons/hicolor || true
+    fi
+fi
+
+exit 0

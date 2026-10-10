@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=RSPSDR
+GenericName=Software Defined Radio
+Comment=Listen to the HF amateur and shortwave bands with an SDRplay RSP1
+Exec=rspsdr
+Icon=rspsdr
+Terminal=false
+Categories=Audio;AudioVideo;HamRadio;Network;
+Keywords=SDR;RSP1;SDRplay;RSPSDR;radio;HF;shortwave;ham;waterfall;spectrum;
+StartupNotify=true

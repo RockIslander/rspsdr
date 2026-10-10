@@ -1,0 +1,98 @@
+#!/usr/bin/make -f
+#
+# RSPSDR is pure Python: the source tree is what gets installed, so there is
+# nothing to compile and no reason to require debhelper on the build machine.
+# This rules file builds the whole .deb with dpkg's own tools, which means
+#
+#     dpkg-buildpackage -us -uc -b
+#
+# works on a plain Debian install with nothing but dpkg-dev added.  The same
+# .deb can be built directly, and into a directory of your choosing:
+#
+#     debian/rules binary                 # writes ../rspsdr_<version>_all.deb
+#     DEB_OUT=dist debian/rules binary    # writes dist/rspsdr_<version>_all.deb
+#
+# `debian/rules test` runs the offline test suite (the hardware suites skip
+# themselves without a radio) and is deliberately not part of the package
+# build, which must not need Qt or a sound card to produce an .deb.
+
+export LC_ALL := C.UTF-8
+
+PKG      := rspsdr
+VERSION  := $(shell dpkg-parsechangelog -SVersion)
+ARCH     := all
+DEB      := $(PKG)_$(VERSION)_$(ARCH).deb
+DEB_OUT  ?= ..
+PKGDIR   := debian/$(PKG)
+DOCDIR   := $(PKGDIR)/usr/share/doc/$(PKG)
+README   := README
+
+build:
+	@echo "== syntax check =="
+	python3 -m compileall -q $(PKG)
+	python3 -c "import ast, pathlib; \
+[ast.parse(p.read_text(), str(p)) for p in pathlib.Path('$(PKG)').rglob('*.py')]; \
+print('all modules parse')"
+
+test:
+	./tests/run_all.sh --offline
+
+clean:
+	rm -rf $(PKGDIR) debian/files debian/*.substvars debian/.debhelper
+	find . -name '__pycache__' -type d -prune -exec rm -rf {} +
+	rm -f ../$(DEB) $(DEB_OUT)/$(DEB)
+
+binary: build
+	rm -rf $(PKGDIR)
+	install -d $(PKGDIR)/DEBIAN \
+	           $(PKGDIR)/usr/bin \
+	           $(PKGDIR)/usr/lib/python3/dist-packages \
+	           $(PKGDIR)/usr/share/applications \
+	           $(PKGDIR)/usr/share/icons/hicolor/scalable/apps \
+	           $(DOCDIR)
+	# The module goes where Debian's own python3 looks, so nothing has to be
+	# added to PYTHONPATH and the installed copy cannot drift from the package.
+	cp -r $(PKG) $(PKGDIR)/usr/lib/python3/dist-packages/
+	rm -rf $(PKGDIR)/usr/lib/python3/dist-packages/$(PKG)/__pycache__
+	find $(PKGDIR)/usr/lib/python3/dist-packages -name '*.pyc' -delete
+	install -m 0755 debian/rspsdr.launcher $(PKGDIR)/usr/bin/$(PKG)
+	# The name the application had before it was RSPSDR, so anything already
+	# pointing at it keeps launching the current build.
+	ln -s $(PKG) $(PKGDIR)/usr/bin/rsp1-listener
+	install -m 0644 $(PKG).desktop \
+	    $(PKGDIR)/usr/share/applications/$(PKG).desktop
+	install -m 0644 $(PKG).svg \
+	    $(PKGDIR)/usr/share/icons/hicolor/scalable/apps/$(PKG).svg
+	install -m 0644 README.md $(DOCDIR)/$(README).md
+	install -m 0644 debian/copyright $(DOCDIR)/copyright
+	gzip -9n -c debian/changelog > $(DOCDIR)/changelog.Debian.gz
+	chmod 0644 $(DOCDIR)/changelog.Debian.gz
+	sha256sum $(DOCDIR)/$(README).md $(DOCDIR)/copyright > \
+	    $(DOCDIR)/SHA256SUMS
+	# dpkg-gencontrol fills in Installed-Size from the staged tree.  There is no
+	# misc:Depends substvar here: debhelper defines that one, this package does
+	# not use debhelper, and an undefined substvar warns on every build.
+	dpkg-gencontrol -p$(PKG) -P$(PKGDIR)
+	chmod 0644 $(PKGDIR)/DEBIAN/control
+	install -m 0755 debian/rspsdr.postinst $(PKGDIR)/DEBIAN/postinst
+	install -m 0755 debian/rspsdr.postrm $(PKGDIR)/DEBIAN/postrm
+	# Normalise the modes: cp(1) copies them from the working tree, where they
+	# are group-writable, and a binary package may not ship 664/775 files.
+	find $(PKGDIR) -type d -exec chmod 0755 {} +
+	find $(PKGDIR) -type f -exec chmod 0644 {} +
+	chmod 0755 $(PKGDIR)/usr/bin/$(PKG) $(PKGDIR)/DEBIAN/postinst \
+	           $(PKGDIR)/DEBIAN/postrm
+	# Only the .deb is touched here: DEB_OUT may be the parent directory when
+	# dpkg-buildpackage drives the build, and no build target may remove that.
+	# mkdir, not install -d: the latter tries to chmod an existing directory,
+	# which fails outright when that directory is someone else's (as "/tmp" is
+	# for a build driven from a directory under /tmp).
+	mkdir -p $(DEB_OUT)
+	rm -f $(DEB_OUT)/$(DEB)
+	dpkg-deb --build --root-owner-group $(PKGDIR) $(DEB_OUT)/$(DEB)
+	dpkg-distaddfile $(DEB) hamradio optional
+	@echo
+	@echo "built $(DEB_OUT)/$(DEB)"
+	@dpkg-deb -I $(DEB_OUT)/$(DEB) | sed -n '1,12p'
+
+.PHONY: build test clean binary

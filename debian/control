@@ -1,0 +1,40 @@
+Source: rspsdr
+Section: hamradio
+Priority: optional
+Maintainer: RockIslander <174265838+RockIslander@users.noreply.github.com>
+Build-Depends: python3 (>= 3.10), dpkg-dev (>= 1.19)
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+Homepage: https://github.com/RockIslander/rspsdr
+
+Package: rspsdr
+Architecture: all
+Depends: python3 (>= 3.10),
+         python3-numpy,
+         python3-pyqt6,
+         python3-pyqt6.qtmultimedia,
+         python3-pyqtgraph,
+         python3-scipy,
+         python3-soapysdr
+Recommends: soapysdr-module-sdrplay3,
+            pipewire-bin | pulseaudio-utils | alsa-utils
+Description: HF / shortwave SDR receiver for the SDRplay RSP1
+ RSPSDR turns an SDRplay RSP1 into a shortwave and amateur-band receiver:
+ a live spectrum and rolling waterfall, tuning by click or dial, and the
+ usual HF demodulators.
+ .
+ Features:
+  * Spectrum and waterfall with auto-tracking levels, nine colour maps,
+    1x-16x zoom and an adjustable waterfall resolution.
+  * AM, synchronous AM, USB, LSB, CW with adjustable pitch, and NFM, each
+    with its passband drawn on the spectrum where the demodulator really
+    puts it.
+  * Audio AGC, squelch, and spectral-subtraction noise reduction that
+    measurably improves the signal-to-noise ratio on a noisy carrier and
+    leaves a clean one untouched.
+  * Memory channels, band and preset jumping, and RF/IF gain controls.
+  * Headless modes: --check, --selftest, --wav, --memories.
+ .
+ The SDRplay module and the SDRplay API are not part of Debian, so they are
+ recommended rather than required and this package installs on a plain
+ Debian system.

@@ -1,0 +1,15 @@
+# 3.0 (native) is unpacked straight from this tree, so anything that is not
+# source has to be named here or it ends up in the .tar.  dpkg-source already
+# skips version control directories.
+tar-ignore = __pycache__
+tar-ignore = *.pyc
+tar-ignore = artifacts
+tar-ignore = dist
+tar-ignore = *.deb
+tar-ignore = *.buildinfo
+tar-ignore = *.changes
+# Left behind by a build that has not been cleaned yet.
+tar-ignore = debian/files
+tar-ignore = debian/rspsdr
+tar-ignore = debian/rspsdr/*
+tar-ignore = debian/*.substvars
