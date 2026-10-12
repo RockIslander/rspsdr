@@ -20,6 +20,11 @@ import time
 
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PyQt6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# The window remembers its settings, so this test -- which drives every control
+# in it -- would otherwise leave the person running it with the test's own
+# frequency, volume and waterfall colours.  A config directory of its own, the
+# same way the channel store is given one below.
+os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp(prefix="rsp1-gui-cfg-")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -166,6 +171,25 @@ def main() -> int:
         accent = int(((a[:, :, 3] > 200) & (a[:, :, 2] > 150)
                       & (a[:, :, 1] > 140) & (a[:, :, 0] < 170)).sum())
         return opaque, colours, accent
+
+    def face_pixels(widget):
+        """The widget as an (h, w, 4) array of bytes, for pixel questions."""
+        img = widget.grab().toImage().convertToFormat(
+            QImage.Format.Format_RGBA8888)
+        ptr = img.constBits()
+        ptr.setsize(img.sizeInBytes())
+        return np.frombuffer(ptr, np.uint8).reshape(
+            img.height(), img.bytesPerLine() // 4, 4)[:, :img.width(), :].astype(int)
+
+    def needle_mask(a):
+        """The red needle's pixels -- the only red thing on either face."""
+        r, g, b = a[:, :, 0], a[:, :, 1], a[:, :, 2]
+        return (r > 140) & (r > g + 60) & (r > b + 60)
+
+    def peak_mask(a):
+        """The peak marker's pixels -- the only yellow thing on the dark face."""
+        r, g, b = a[:, :, 0], a[:, :, 1], a[:, :, 2]
+        return (r > 200) & (g > 150) & (b < 170) & (g > b + 40)
 
     # The mark is painted, not loaded, so a blank widget would be invisible to
     # every other check here: the widget is still visible, still the right size
@@ -828,6 +852,120 @@ def main() -> int:
         win.waterfall.set_levels(True, 30.0, -110.0, -40.0)
         win.waterfall.set_view(*win._view(live, span))
 
+        # ---- the picture is drawn over the span the axis shows -----------
+        # The regression guard for the trap behind "tuning is not accurate".
+        # An ImageItem scales by the image it already holds, so a rectangle
+        # applied before the new array was handed over was built from the
+        # *previous* column count: the first frame was drawn 37.6 MHz wide in a
+        # 2 MHz window, and the width ratio was out again after any resize or
+        # detail change.  The axis, and every click and drag, stayed correct
+        # throughout -- so the picture showed a signal at a frequency that was
+        # nothing like the one the window said, and tuning to the carrier you
+        # could see landed you somewhere else.
+        def scene_x(freq: float) -> float:
+            """Where the axis and the plot's own rectangle put this frequency.
+
+            Worked out from the axis range and the plot rectangle, not from the
+            plot's scene transform, so this is an independent reference: a plot
+            whose transform says one thing and whose axis says another fails.
+            """
+            lo, hi = win.waterfall.plotItem.vb.viewRange()[0]
+            r = win.waterfall.plotItem.vb.sceneBoundingRect()
+            return r.x() + (freq / 1e6 - lo) / (hi - lo) * r.width()
+
+        for detail in (ui.SCREEN_DETAIL, 2400, ui.WF_MAX_COLS):
+            win.cmb_wfdetail.setCurrentIndex(detail_index(detail))
+            win.waterfall.set_view(centre - span, centre + span)
+            fake_frame(16384, -90.0, peak_at=8192)
+            win.waterfall.grab()            # paint, so the plot's mapping is current
+            img = win.waterfall.img
+            left = img.mapToScene(QPointF(0.0, 0.0)).x()
+            right = img.mapToScene(QPointF(float(win.waterfall.cols()), 0.0)).x()
+            want_l, want_r = scene_x(centre - span), scene_x(centre + span)
+            check(f"the picture is drawn over the span the axis shows "
+                  f"({detail or 'Screen'})",
+                  abs(left - want_l) <= 1.5 and abs(right - want_r) <= 1.5,
+                  f"{win.waterfall.cols()} columns drawn over {left:.0f}..{right:.0f} px, "
+                  f"the axis puts that window at {want_l:.0f}..{want_r:.0f} px")
+
+        # ---- a drag follows the pointer, and the window stays put ---------
+        # The other half of the same complaint.  A recentre mid-gesture moved
+        # the window out from under the pointer, so a drag across 90 % of the
+        # half-span jumped half a window and then tuned in steps of it, with
+        # the frequency under the cursor changing as the user dragged.  The
+        # window may follow the dial -- once the button is up.
+        live = win.radio.settings.center_freq
+        half = win.radio.settings.sample_rate / (2.0 * max(1, win._zoom))
+        win.waterfall.set_view(live - half, live + half)
+        win.waterfall.push(live, np.full(16384, -110.0, np.float32),
+                           win.radio.settings.sample_rate, live - half, live + half)
+        app.processEvents()
+
+        # Where a frequency sits, worked out from the axis range and the plot
+        # rectangle rather than from the transform the widget itself uses to
+        # answer a click -- otherwise this would be checking the mapping against
+        # itself and could not fail.
+        def px_of(freq: float) -> int:
+            lo, hi = win.waterfall.plotItem.vb.viewRange()[0]
+            r = win.waterfall.plotItem.vb.sceneBoundingRect()
+            frac = (freq / 1e6 - lo) / (hi - lo)
+            return int(round(r.x() + frac * r.width()))
+
+        def freq_at(x: float) -> float:
+            """What the axis and the plot rectangle put under this pixel."""
+            lo, hi = win.waterfall.plotItem.vb.viewRange()[0]
+            r = win.waterfall.plotItem.vb.sceneBoundingRect()
+            return (lo + (x - r.x()) / r.width() * (hi - lo)) * 1e6
+
+        def drag_to(fracs):
+            """Press, then drag through the fractions of the half-span given."""
+            y = float(win.waterfall.height() // 3)
+            x0 = px_of(live + fracs[0] * half)
+            app.sendEvent(win.waterfall.viewport(), QMouseEvent(
+                QEvent.Type.MouseButtonPress, QPointF(float(x0), y),
+                Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier))
+            app.processEvents()
+            ends = {}
+            for frac in fracs[1:]:
+                x = px_of(live + frac * half)
+                ends[frac] = freq_at(x)         # measured before the move
+                app.sendEvent(win.waterfall.viewport(), QMouseEvent(
+                    QEvent.Type.MouseMove, QPointF(float(x), y),
+                    Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+                    Qt.KeyboardModifier.NoModifier))
+                app.processEvents()
+            return ends
+
+        ends = drag_to((0.4, 0.7, 0.98))        # 0.98 is past the recentre point
+        check("a drag on the waterfall leaves the window where it was",
+              abs(win.spn_center.value() * 1e6 - live) < 1.0
+              and abs((win.waterfall._hi_freq - win.waterfall._lo_freq)
+                      - 2.0 * half) < 1.0,
+              f"centre spin {win.spn_center.value()*1e6/1e6:.6f} MHz (receiver at "
+              f"{live/1e6:.6f}), window "
+              f"{(win.waterfall._hi_freq - win.waterfall._lo_freq)/1e3:.0f} kHz "
+              f"wide")
+        held = win.spn_freq.value() * 1e6
+        check("and tunes to the frequency the pointer is over",
+              abs(held - ends[0.98]) < half * 0.02,
+              f"{(held - live)/1e3:+.1f} kHz from the receiver centre, the "
+              f"window says {(ends[0.98] - live)/1e3:+.1f} kHz")
+        app.sendEvent(win.waterfall.viewport(), QMouseEvent(
+            QEvent.Type.MouseButtonRelease,
+            QPointF(float(px_of(live + 0.98 * half)),
+                    float(win.waterfall.height() // 3)),
+            Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier))
+        app.processEvents()
+        check("and lets the window follow the dial once the button is up",
+              abs(win.spn_center.value() * 1e6 - ends[0.98]) < half * 0.05,
+              f"receiver centre {win.spn_center.value():.6f} MHz for a dial at "
+              f"{ends[0.98]/1e6:.6f} MHz")
+        win.spn_freq.setValue(was_tuned / 1e6)
+        win.spn_center.setValue(live / 1e6)     # put the receiver back
+        win.waterfall.set_view(*win._view(live, span))
+
         # The readout is how anyone can tell whether the FFT or the picture is
         # the limit, which the column count on its own does not say.
         win._wf_detail_readout()
@@ -1362,6 +1500,115 @@ def main() -> int:
         check("moving the mouse over the spectrum reads out the frequency",
               "cursor" in win.lbl_cursor.text() and "MHz" in win.lbl_cursor.text(),
               repr(win.lbl_cursor.text()))
+
+        # ---- the analogue signal meter ---------------------------------
+        # It is fed from the receiver running in this window, and its face is
+        # painted by hand: what it reads and where it draws the needle are two
+        # different questions, and both are asked here.
+        live = win.smeter.reading_text()
+        check("the meter reads the live signal",
+              live not in ("", "--") and win.lbl_smeter.text().startswith(live),
+              f"the face says {live!r} ({win.smeter.level_dbfs:.1f} dBFS with S9 "
+              f"at {win.smeter.ref_dbfs:g} dBFS)")
+        check("and sits in the window at its own size",
+              win.smeter.isVisible() and win.smeter.width() == ui.smeter.WIDTH
+              and win.smeter.height() == ui.smeter.HEIGHT,
+              f"{win.smeter.width()}x{win.smeter.height()} px")
+
+        # Through the controls, not the methods behind them: the calibration,
+        # the peak switch and the face all have to reach the widget.
+        win.spn_sref.setValue(ui.smeter.DEFAULT_REF_DBFS)
+        win.chk_speak.setChecked(True)
+        win.cmb_sface.setCurrentIndex(win.cmb_sface.findData("dark"))
+        check("the meter's own controls reach it",
+              (win.smeter.ref_dbfs, win.smeter.peak_on, win.smeter.face)
+              == (ui.smeter.DEFAULT_REF_DBFS, True, "dark"),
+              f"S9 at {win.smeter.ref_dbfs:g} dBFS, peak {win.smeter.peak_on}, "
+              f"face {win.smeter.face!r}")
+
+        def level_for(dbm):
+            """The dBFS that reads a given dBm on this calibration."""
+            return dbm - ui.smeter.S9_DBM + win.smeter.ref_dbfs
+
+        # A needle is a line drawn by hand, so "it points where the scale says"
+        # is a question about pixels: the red ones have to be where the geometry
+        # puts the tip, either side of the middle of the dial.
+        for dbm, side in ((-53.0, "right"), (-100.0, "left")):
+            win.smeter.reset()
+            win.smeter.feed(level_for(dbm), 0.045)
+            red = needle_mask(face_pixels(win.smeter))
+            cols = np.nonzero(red.any(axis=0))[0]
+            tip = win.smeter.needle()[2]
+            end = int(cols.max()) if side == "right" else int(cols.min())
+            check(f"the needle is drawn {side} of centre, where the scale puts it",
+                  int(red.sum()) > 40 and cols.size > 8 and abs(end - tip) <= 4,
+                  f"{win.smeter.reading_text()} ({dbm:+.0f} dBm): "
+                  f"{int(red.sum())} red pixels over x {cols.min()}..{cols.max()}, "
+                  f"the geometry says the tip is at {tip:.1f} "
+                  f"of {win.smeter.width()}")
+
+        # The peak marker is a second, shorter needle that stays where the level
+        # was while the first one falls away.
+        win.smeter.reset()
+        win.smeter.feed(level_for(-53.0), 0.045)
+        for _ in range(8):                        # 360 ms: inside the half second
+            win.smeter.feed(level_for(-140.0), 0.045)
+        face = face_pixels(win.smeter)
+        red = np.nonzero(needle_mask(face).any(axis=0))[0]
+        yellow = np.nonzero(peak_mask(face).any(axis=0))[0]
+        check("the peak marker holds the level the needle has left behind",
+              yellow.size > 10 and red.size > 10 and yellow.any()
+              and abs(int(yellow.max()) - win.smeter.peak_needle()[2]) <= 4
+              and red.max() < yellow.max() - 20,
+              f"peak {win.smeter.peak_dbm:+.0f} dBm at x {yellow.max() if yellow.size else '-'} "
+              f"(geometry {win.smeter.peak_needle()[2]:.1f}), needle "
+              f"{win.smeter.dbm:+.0f} dBm at x {red.max() if red.size else '-'}")
+
+        # Both faces are painted from a table, so switching has to change the
+        # picture -- and half of the table is which way round it is.
+        win.smeter.reset()
+        dark = face_pixels(win.smeter)
+        win.cmb_sface.setCurrentIndex(win.cmb_sface.findData("cream"))
+        cream = face_pixels(win.smeter)
+        win.cmb_sface.setCurrentIndex(win.cmb_sface.findData("dark"))
+        check("the cream face is a light dial and the dark one a dark one",
+              dark[:, :, :3].mean() < 60 and cream[:, :, :3].mean() > 150,
+              f"the dark face averages {dark[:, :, :3].mean():.0f} of 255, "
+              f"the cream one {cream[:, :, :3].mean():.0f}")
+        check("... and the needle is drawn on both of them",
+              needle_mask(dark).sum() > 40 and needle_mask(cream).sum() > 40,
+              f"{needle_mask(dark).sum()} red pixels on the dark face, "
+              f"{needle_mask(cream).sum()} on the cream one")
+
+        # With the receiver stopped the needle has nowhere to stand: it falls
+        # back to its rest and the face stops claiming a reading, rather than
+        # freezing at the last thing that was heard.
+        def pump(seconds):
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < seconds:
+                QApplication.processEvents()
+                time.sleep(0.02)
+
+        win.btn_start.click()
+        pump(1.2)
+        red = needle_mask(face_pixels(win.smeter))
+        rest_tip = win.smeter.needle()[2]
+        check("stopping the receiver lets the needle fall back to rest",
+              win.smeter.reading_text() == "--"
+              and "no signal reading" in win.lbl_smeter.text()
+              and red.any() and abs(int(np.nonzero(red.any(axis=0))[0].min())
+                                    - rest_tip) <= 4,
+              f"{int(red.sum())} red pixels with the tip at "
+              f"{np.nonzero(red.any(axis=0))[0].min() if red.any() else '-'} "
+              f"(rest is {rest_tip:.1f} of {win.smeter.width()}), the face says "
+              f"{win.lbl_smeter.text()!r}")
+        win.btn_start.click()
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 4.0 and not win.radio.opened:
+            QApplication.processEvents()
+            time.sleep(0.05)
+        check("and starting it again brings the radio and the meter back",
+              win.radio.opened, f"opened={win.radio.opened}")
 
         # Leave the state as the rest of the test expects it.
         win.spn_freq.setValue(10_000_000 / 1e6)

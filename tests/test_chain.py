@@ -226,6 +226,89 @@ check("both meters move 6 dB for a halving of amplitude",
       f"meter {first_meter:.1f} -> {last_meter:.1f} dB "
       f"(two halvings = 12 dB)")
 
+print("\n== the level the signal meter reads ==")
+# The meter is fed ``Demodulator.passband_db`` -- the level inside the channel
+# filter, taken before the noise reduction, the AGC, the squelch and the volume.
+# That is what makes it a measurement of what arrived at the receiver rather
+# than of how the user is listening, and every part of that claim is checkable
+# here: the level has to follow the carrier faithfully, and none of the
+# listening controls may move it.
+from rspsdr import smeter  # noqa: E402
+
+
+def meter_run(amp, interferer=0.0, **kw):
+    """(passband level, whole-baseband level, audio) for a carrier."""
+    opts = dict(nr=False, nr_level=50.0, squelch_db=-140.0, volume=0.6,
+                audio_agc=False)
+    opts.update(kw)
+    radio, _spectra = build(2000000, mode="am", filter_bw=6000.0, **opts)
+    hop = radio.ddc.hop_in
+    hops = 24
+    n = hop * hops
+    iq = am_iq(2000000, n, 0.0, depth=0.0, amp=amp)
+    if interferer:
+        t = np.arange(n) / 2000000.0
+        iq = iq + (interferer
+                   * np.exp(2j * math.pi * 18000.0 * t)).astype(np.complex64)
+    audio = run(radio, iq, hop, hops)
+    return radio.demod.passband_db, radio.demod.signal_db, audio
+
+
+loud = [meter_run(amp)[0] for amp in (0.4, 0.2, 0.1)]
+steps = [loud[i] - loud[i + 1] for i in range(2)]
+check("the level falls 6.02 dB for every halving of the carrier",
+      all(abs(step - 6.0206) < 0.05 for step in steps),
+      ", ".join(f"{step:.3f} dB" for step in steps))
+# ... and the needle is the standard's scale on top of it: one unit per 6 dB.
+units = [smeter.s_for_dbm(smeter.dbm_for_dbfs(_l)) for _l in loud]
+check("so the needle falls exactly one S unit for a halving",
+      all(abs((units[i] - units[i + 1]) - 1.0) < 0.01 for i in range(2)),
+      ", ".join(f"S{u:.2f}" for u in units))
+check("over S9 the face counts dB over S9, as the standard's steps do",
+      smeter.reading(smeter.dbm_for_dbfs(loud[1]))
+      == f"S9 +{smeter.dbm_for_dbfs(loud[1]) - smeter.S9_DBM:.0f} dB",
+      f"{smeter.reading(smeter.dbm_for_dbfs(loud[1]))} at {loud[1]:.2f} dBFS")
+# A weak carrier, the other end of the dial, where the face reads in S units.
+faint = [meter_run(amp)[0] for amp in (0.005, 0.0025, 0.00125)]
+faint_units = [smeter.s_for_dbm(smeter.dbm_for_dbfs(v)) for v in faint]
+check("below S9 the same 6 dB is one whole S unit on the face",
+      all(abs((faint[i] - faint[i + 1]) - 6.0206) < 0.05 for i in range(2))
+      and all(abs((faint_units[i] - faint_units[i + 1]) - 1.0) < 0.01
+              for i in range(2))
+      and all(smeter.reading(smeter.dbm_for_dbfs(v)) == f"S{u:.1f}"
+              for v, u in zip(faint, faint_units)),
+      ", ".join(f"{v:.2f} dBFS {smeter.reading(smeter.dbm_for_dbfs(v))}"
+                for v in faint))
+
+plain = loud[1]
+for name, kw in (("the noise reduction", dict(nr=True, nr_level=80.0)),
+                 ("the audio AGC", dict(audio_agc=True)),
+                 ("the volume", dict(volume=0.02)),
+                 ("the squelch", dict(squelch_db=-10.0))):
+    got, _sig, audio = meter_run(0.2, **kw)
+    quiet = not audio.size or float(np.max(np.abs(audio))) == 0.0
+    check(f"... and does not move when {name} changes",
+          abs(got - plain) < 1e-9,
+          f"{got:.3f} dBFS against {plain:.3f} dBFS with "
+          f"{'silent audio' if quiet else 'audio playing'}")
+# The squelch is the sharpest case of the same point: pressed shut, this
+# receiver makes no sound at all, and the meter still shows the signal that is
+# arriving -- which is the whole reason the level is taken where it is.
+muted = meter_run(0.2, squelch_db=-10.0)
+check("a squelched receiver is silent and still reads its signal",
+      float(np.max(np.abs(muted[2]))) == 0.0 and abs(muted[0] - plain) < 1e-9,
+      f"{muted[0]:.3f} dBFS ({smeter.reading(smeter.dbm_for_dbfs(muted[0]))}) "
+      f"while the audio is silent")
+
+# A carrier outside the passband is the other half of "inside the filter": the
+# whole-baseband level moves, the meter does not.
+here = meter_run(0.1)
+there = meter_run(0.1, interferer=0.6)
+check("a carrier 18 kHz away moves the baseband level but not the meter's",
+      (there[1] - here[1]) > 10.0 and abs(there[0] - here[0]) < 0.05,
+      f"baseband {here[1]:.1f} -> {there[1]:.1f} dB, meter "
+      f"{here[0]:.2f} -> {there[0]:.2f} dBFS")
+
 print()
 if failures:
     print(f"{len(failures)} FAILURE(S): {failures}")

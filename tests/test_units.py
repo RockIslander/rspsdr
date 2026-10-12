@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 import os
+import random
 import shutil
 import sys
 import tempfile
@@ -550,6 +551,187 @@ radio._error("probe failure")
 check("a device error reaches both the status and the callback",
       radio.status.error == "probe failure" and errors == ["probe failure"],
       f"status {radio.status.error!r}, callback {errors}")
+
+# ---------------------------------------------------------------- the meter
+# The signal meter's scale is the IARU recommendation and its dial is a printed
+# one, so what it reads is arithmetic that can be checked exactly; the needle's
+# ballistics are the recommended quasi-peak ones and are checked against the
+# time constants they are defined by.
+print("\n== signal meter scale ==")
+from rspsdr import smeter  # noqa: E402
+check("S9 is -73 dBm (50 uV into 50 ohms at HF)", smeter.S9_DBM == -73.0)
+check("a unit is 6 dB, so S1 is -121 dBm and S5 is -97 dBm",
+      smeter.dbm_for_s(1) == -121.0 and smeter.dbm_for_s(5) == -97.0,
+      f"S1 {smeter.dbm_for_s(1):g}, S5 {smeter.dbm_for_s(5):g}")
+check("above S9 the steps are 10 dB, not 6",
+      (smeter.reading(-63.0), smeter.reading(-43.0), smeter.reading(-23.0))
+      == ("S9 +10 dB", "S9 +30 dB", "S9 +50 dB"),
+      ", ".join(smeter.reading(v) for v in (-63.0, -43.0, -23.0)))
+check("S units and dBm convert both ways",
+      all(abs(smeter.dbm_for_s(smeter.s_for_dbm(smeter.dbm_for_s(u))) -
+              smeter.dbm_for_s(u)) < 1e-9 for u in (1, 2.5, 9, 12, 19)))
+check("the readings are the ones an operator would say",
+      (smeter.reading(-121.0), smeter.reading(-97.0), smeter.reading(-79.0),
+       smeter.reading(-73.0), smeter.reading(-53.0), smeter.reading(-13.0))
+      == ("S1.0", "S5.0", "S8.0", "S9 +0 dB", "S9 +20 dB", "S9 +60 dB"),
+      ", ".join(smeter.reading(v) for v in (-121.0, -97.0, -79.0, -73.0, -53.0,
+                                          -13.0)))
+check("a level between two marks reads between them",
+      smeter.reading(-76.0) == "S8.5" and smeter.reading(-100.0) == "S4.5",
+      f"{smeter.reading(-76.0)}, {smeter.reading(-100.0)}")
+check("below the first mark the needle is off the scale, and says so",
+      smeter.reading(-140.0) == "S<1" and smeter.reading(-121.0) == "S1.0")
+check("the dial starts below S1 and ends at S9+60",
+      smeter.MARKS[0][0] == -127.0 and smeter.MARKS[-1][0] == -13.0,
+      f"{smeter.MARKS[0][0]:g} .. {smeter.MARKS[-1][0]:g} dBm")
+check("every mark is a half unit below S9 or a 10 dB step above it",
+      all(((smeter.S9_DBM - dbm) % 3.0 < 1e-9 if dbm < smeter.S9_DBM
+           else (dbm - smeter.S9_DBM) % 5.0 < 1e-9)
+          for dbm, _label, _major in smeter.MARKS))
+check("the three dB marks above S9 are numbered, and the standard's steps are long",
+      [m[1] for m in smeter.MARKS if m[1] and m[0] > smeter.S9_DBM]
+      == ["+20", "+40", "+60"]
+      and [m[0] for m in smeter.MARKS if m[0] > smeter.S9_DBM and m[2]]
+      == [-63.0, -53.0, -43.0, -33.0, -23.0, -13.0],
+      str([m[1] for m in smeter.MARKS if m[1] and m[0] > smeter.S9_DBM]))
+
+# What reads S9 is one number, and it moves the whole scale by exactly itself.
+check("the default reference puts S9 at S9",
+      smeter.dbm_for_dbfs(smeter.DEFAULT_REF_DBFS) == smeter.S9_DBM)
+check("raising the reference by 6 dB lowers every reading by one unit",
+      abs((smeter.s_for_dbm(smeter.dbm_for_dbfs(-30.0, -51.0))
+           - smeter.s_for_dbm(smeter.dbm_for_dbfs(-30.0, -45.0))) - 1.0) < 1e-9)
+
+print("\n== signal meter dial ==")
+dial = smeter.Dial()
+check("the marks are evenly spaced around the arc",
+      all(abs((dial.mark_angle(i + 1) - dial.mark_angle(i))
+              - (smeter.SPAN_DEG / (len(smeter.MARKS) - 1))) < 1e-9
+          for i in range(len(smeter.MARKS) - 1)))
+check("the ends of the dial are the ends of the sweep",
+      dial.mark_angle(0) == smeter.START_DEG
+      and abs(dial.mark_angle(len(smeter.MARKS) - 1)
+              - (smeter.START_DEG + smeter.SPAN_DEG)) < 1e-9,
+      f"{dial.mark_angle(0):g} .. {dial.mark_angle(len(smeter.MARKS) - 1):g}")
+check("every mark points where it is drawn",
+      all(abs(dial.angle(dbm) - dial.mark_angle(i)) < 1e-9
+          for i, (dbm, _l, _m) in enumerate(smeter.MARKS)))
+# The needle is the instrument, so what matters is what a level reads back as:
+# the angle for a level must round-trip to within half the spacing of the marks
+# it falls between, which is the finest a needle can be read to.
+lo, hi = int(smeter.MARKS[0][0]), int(smeter.MARKS[-1][0])
+round_trip = []
+for dbm in range(lo, hi + 1):
+    got = dial.dbm_at_angle(dial.angle(float(dbm)))
+    round_trip.append(abs(got - dbm) - dial.resolution_db(float(dbm)) / 2.0)
+check("every level on the dial round-trips through the needle to within half a mark",
+      max(round_trip) <= 0.0, f"worst {max(round_trip):+.2f} dB of a tolerance")
+check("the dial is monotonic across its whole range",
+      all(dial.angle(lo + i) < dial.angle(lo + i + 1) for i in range(hi - lo)))
+check("the dial resolves 3 dB in the S region and 5 dB above S9",
+      dial.resolution_db(-100.0) == 3.0 and dial.resolution_db(-60.0) == 5.0,
+      f"{dial.resolution_db(-100.0):g} dB, {dial.resolution_db(-60.0):g} dB")
+check("a needle below the dial and one above it both stop at the ends",
+      dial.angle(-200.0) == dial.mark_angle(0)
+      and dial.angle(0.0) == dial.mark_angle(len(smeter.MARKS) - 1))
+
+# The arc the needle sweeps: a distant pivot below the window, so the scale is a
+# shallow bow across the face rather than a dial, and the tip stays inside it.
+w, h = float(smeter.WIDTH), float(smeter.HEIGHT)
+tips = [smeter.needle_geometry(w, h, dial.mark_angle(i)) for i in range(len(smeter.MARKS))]
+radii = [((x - w / 2) ** 2 + (y - tips[0][1]) ** 2) ** 0.5 for _px, _py, x, y in tips]
+check("every mark sits on one circle about the pivot",
+      max(radii) - min(radii) < 1e-9, f"radius {min(radii):.1f} .. {max(radii):.1f}")
+check("the tip stays inside the face at every mark",
+      all(2.0 <= x <= w - 2.0 and 2.0 <= y <= h - 2.0 for _x, _y, x, y in tips),
+      f"x {min(t[2] for t in tips):.1f}..{max(t[2] for t in tips):.1f}, "
+      f"y {min(t[3] for t in tips):.1f}..{max(t[3] for t in tips):.1f}")
+check("the pivot is out of sight below the window",
+      tips[0][1] > h and abs(tips[0][0] - w / 2) < 1e-9,
+      f"pivot y {tips[0][1]:.1f} of {h:.0f}")
+check("the scale bows upwards away from the centre",
+      tips[0][3] > tips[len(tips) // 2][3] and tips[-1][3] > tips[len(tips) // 2][3],
+      f"ends {tips[0][3]:.1f}, middle {tips[len(tips) // 2][3]:.1f}")
+check("the needle is left of centre at rest and right of it at full scale",
+      tips[0][2] < w / 2 < tips[-1][2],
+      f"left {tips[0][2]:.1f}, right {tips[-1][2]:.1f}, centre {w/2:.1f}")
+short = smeter.needle_geometry(w, h, 0.0, 0.94)
+check("the peak marker is a shorter needle, pointing the same way",
+      abs(short[2] - smeter.needle_geometry(w, h, 0.0)[2]) < 1e-9
+      and short[3] > smeter.needle_geometry(w, h, 0.0)[3],
+      f"peak tip {short[3]:.1f} vs needle {smeter.needle_geometry(w, h, 0.0)[3]:.1f}")
+
+print("\n== signal meter ballistics ==")
+ball = smeter.Ballistics()
+ball.update(-100.0, 0.05)
+check("the first sample is taken as it comes, not risen to",
+      ball.value == -100.0, str(ball.value))
+ball.reset()
+check("reset puts the needle back to where it knows nothing",
+      ball.value is None and ball.peak is None)
+
+# Rising: the recommended 10 ms attack, so 63% of a step arrives in 10 ms.
+ball = smeter.Ballistics()
+ball.update(-120.0, 0.05)
+ball.update(-90.0, smeter.Ballistics().attack)
+check("a step up is 63% of the way there after the 10 ms attack time",
+      abs(ball.value - (-120.0 + 30.0 * (1.0 - 1.0 / math.e))) < 0.2,
+      f"{ball.value:.2f} dB of a 30 dB step")
+ball = smeter.Ballistics()
+ball.update(-120.0, 0.05)
+for _ in range(50):
+    ball.update(-90.0, 0.001)
+check("... and five time constants later is within 0.2 dB of it",
+      abs(ball.value + 90.0) < 0.25, f"{ball.value:.2f} dB after 50 ms")
+
+# Falling: the recommended decay is no faster than 500 ms.
+ball = smeter.Ballistics()
+ball.update(-90.0, 0.05)
+ball.update(-150.0, ball.decay)
+check("a step down is 63% of the way there after the 500 ms decay time",
+      abs(ball.value - (-150.0 + 60.0 / math.e)) < 0.2,
+      f"{ball.value:.2f} dB after 0.5 s of a 60 dB drop")
+ball = smeter.Ballistics()
+ball.update(-90.0, 0.05)
+for _ in range(45):                      # 45 x 45 ms: one window repaint rate
+    ball.update(-150.0, 0.045)
+check("the needle is still visibly falling two seconds after the signal went",
+      -150.0 < ball.value < -105.0, f"{ball.value:.1f} dB of -150 dBm")
+check("the fall is slower than the rise, as a meter's is",
+      smeter.Ballistics().decay > 10 * smeter.Ballistics().attack,
+      f"attack {smeter.Ballistics().attack:g} s, decay {smeter.Ballistics().decay:g} s")
+
+# Peak hold: a spike between repaints must still be seen on the peak needle.
+ball = smeter.Ballistics()
+ball.update(-100.0, 0.045)
+for _ in range(20):
+    ball.update(-70.0 if _ == 3 else -100.0, 0.001)
+check("a spike shorter than the needle's own rise is still caught by the peak",
+      abs(ball.peak + 70.0) < 0.01, f"peak {ball.peak:.2f} of a -70 dBm spike")
+value_at_hold = ball.value
+for _ in range(49):                      # 490 ms: still inside the half second
+    ball.update(-100.0, 0.01)
+check("the peak is held for the half second Icom documents",
+      abs(ball.peak + 70.0) < 1.0 and abs(ball.value - value_at_hold) > 0.0,
+      f"peak {ball.peak:.2f} dB after 0.49 s")
+for _ in range(60):                      # and then it starts to fall away
+    ball.update(-100.0, 0.01)
+check("and then it falls away towards the needle",
+      ball.peak > ball.value + 5.0 and ball.peak < -71.0,
+      f"peak {ball.peak:.1f} vs needle {ball.value:.1f} dBm")
+ball = smeter.Ballistics()
+rng = random.Random(7)
+levels = [-90.0] + [rng.uniform(-140.0, -60.0) for _ in range(300)]
+lowest = 99.0
+for target in levels:
+    value, peak = ball.update(target, 0.045)
+    lowest = min(lowest, peak - value)
+check("the peak needle never reads below the needle -- it is a maximum",
+      lowest >= -1e-9, f"worst {lowest:+.4f} dB under it")
+check("and it always holds the highest level of the last half second",
+      all(ball.peak >= t - 1e-9 for t in levels[-11:]),
+      f"peak {ball.peak:.1f} dBm against {min(levels[-11:]):.1f}.."
+      f"{max(levels[-11:]):.1f} in the last 0.5 s")
 
 # ---------------------------------------------------------------- band plan
 print("\n== band plan ==")

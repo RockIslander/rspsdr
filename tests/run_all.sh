@@ -39,9 +39,18 @@ quiet() { grep -viE 'vulkan|ffmpeg|vdpau|MESA|multimedia.plugin|nullptr|Gtk-Mess
 
 dsp()      { python3 tests/test_dsp.py | quiet; }
 memory()   { python3 tests/test_memory.py | quiet; }
+# Needs neither radio nor display: a temporary config directory stands in for the
+# user's, and the window is opened offscreen with the device left unopened.
+prefs()    { python3 tests/test_prefs.py | quiet; }
 units()    { python3 tests/test_units.py | quiet; }
 chain()    { python3 tests/test_chain.py | quiet; }
 cli()      { python3 -m rspsdr --memories | quiet; }
+# FT8 needs no radio: the slot cutting is driven by synthetic audio and a clock
+# the test moves, and the decoder half skips itself when WSJT-X is not there.
+ft8()      { python3 tests/test_ft8.py | quiet; }
+# Needs no radio: the device and the window are both stood in for, so a busy
+# device can be produced to order (which a real one cannot).
+startup()  { QT_QPA_PLATFORM=offscreen python3 tests/test_startup.py | quiet; }
 # A packaged build has to be able to say which build it is, and the version is
 # written down in three places that are easy to let drift: the module, what
 # --version prints, and the Debian changelog the package is named after.
@@ -70,6 +79,11 @@ wav()      { python3 -m rspsdr --selftest --wav artifacts/verify.wav \
              && python3 tests/check_wav.py artifacts/verify.wav; }
 gui()      { QT_QPA_PLATFORM=offscreen python3 tests/gui_smoke.py \
                  --shot artifacts/verify_gui.png --seconds 10 | quiet; }
+# The headless decoder path, on the real radio: two or more slots must be
+# captured.  Whether anything is *heard* depends on the band and the hour, so
+# the verdict is about the pipeline, not about propagation.
+ft8live()  { python3 -m rspsdr --ft8 --freq 7074000 --duration 35 \
+                 | quiet; }
 # Needs a real display as well as the radio; skips itself without either.
 real()     { python3 tests/real_display_check.py --shot-dir artifacts | quiet; }
 
@@ -78,8 +92,11 @@ run "unit tests"         units
 run "receive chain"      chain
 run "dsp unit tests"     dsp
 run "memory store tests" memory
+run "settings persistence" prefs
 run "cli memories"       cli
 run "version agreement"  version
+run "device busy recovery" startup
+run "ft8 unit tests"       ft8
 
 if [ "$OFFLINE" = "1" ]; then
     skip "hardware checks" "--offline"
@@ -91,6 +108,7 @@ from rspsdr.radio import list_devices
 sys.exit(0 if list_devices() else 1)" >/dev/null 2>&1; then
         run "device diagnostics"   check
         run "headless receive"     receive
+        run "ft8 on the air"       ft8live
         run "recorded audio"       wav
         run "gui smoke test"       gui
         run "real display"         real

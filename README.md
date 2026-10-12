@@ -42,11 +42,17 @@ Runtime, all available from the Debian/Ubuntu archives:
 | Qt 6 bindings | `python3-pyqt6`, `python3-pyqt6.qtmultimedia` | the GUI and audio |
 | Plotting | `python3-pyqtgraph` | spectrum and waterfall |
 | Numerics | `python3-numpy`, `python3-scipy` | DSP, and the FFT (see below) |
+| FT8 decoder *(optional)* | `wsjtx` | decoding FT8 — see below |
 
 ```bash
 sudo apt install python3-soapysdr soapysdr-module-sdrplay3 python3-pyqtgraph \
                  python3-pyqt6.qtmultimedia python3-numpy python3-scipy
 ```
+
+WSJT-X is optional and only needed for FT8 (`sudo apt install wsjtx`): it ships
+`jt9`, the FT8 decoder the mode drives. Everything else — including the whole
+FT8 suite in `tests/` when `ft8sim` is not there to test with — works without it,
+and the FT8 mode says what is missing rather than pretending to decode.
 
 The RSP1 also needs the vendor API and its daemon:
 
@@ -58,7 +64,7 @@ SoapySDRUtil --find             # should print "driver = sdrplay"
 ## Installing from a Debian package
 
 ```bash
-sudo apt install ./rspsdr_1.0.1_all.deb     # apt, not dpkg: it pulls the deps
+sudo apt install ./rspsdr_1.3.0_all.deb     # apt, not dpkg: it pulls the deps
 ```
 
 The package is architecture-independent and installs:
@@ -86,7 +92,7 @@ Remove it with `sudo apt remove rspsdr` (your saved channels in
 ## Building the package
 
 ```bash
-dpkg-buildpackage -us -uc -b        # leaves ../rspsdr_1.0.1_all.deb
+dpkg-buildpackage -us -uc -b        # leaves ../rspsdr_1.3.0_all.deb
 DEB_OUT=dist debian/rules binary    # or build it into dist/ instead
 ```
 
@@ -95,8 +101,8 @@ The build needs `dpkg-dev` and nothing else — RSPSDR is pure Python, so
 requiring debhelper. `debian/rules test` runs the offline test suite; it is
 kept out of the package build, which must not need Qt or a sound card.
 
-A source package (`rspsdr_1.0.1.dsc` and its `.tar.xz`) is built with
-`dpkg-source -b .` from a directory named `rspsdr-1.0.1`, which is the name
+A source package (`rspsdr_1.3.0.dsc` and its `.tar.xz`) is built with
+`dpkg-source -b .` from a directory named `rspsdr-1.3.0`, which is the name
 `3.0 (native)` gives the tarball's root. Build products, caches and test output
 are excluded by `debian/source/options`, so a tarball built straight after a
 compile is still clean.
@@ -121,7 +127,15 @@ The radio starts automatically when the window opens.
 Clicking or tuning near the edge of the window re-centres the receiver
 automatically, so the signal you are listening to stays on screen. The limit is
 the visible window, not the receiver span, so this keeps working when you are
-zoomed in.
+zoomed in. A **drag** follows the pointer exactly: the window is left alone
+until the button comes up, so the frequency under the cursor does not move
+while you are holding it, and then it follows the dial in one step. For the
+duration of the gesture the pointer-to-frequency mapping is frozen at what the
+axis showed when the button went down, so nothing that repaints meanwhile — a
+re-centre commanded just before it, a resize, the window following the dial —
+can shift the frequency out from under the hand. A click or drag reads its
+frequency from the scale the picture is drawn against, so it lands on the
+frequency the labels show.
 
 **Mode and filter** — `AM` (envelope), `SAM` (synchronous, holds up much better
 on a fading shortwave signal), `USB`, `LSB`, `CW` (with adjustable pitch), and
@@ -138,6 +152,43 @@ floor off the bottom of the waterfall. **RF gain** (0–3) trades sensitivity fo
 overload immunity. **Tuner BW** sets the analogue filter; *Auto* tracks the
 sample rate.
 
+**The signal meter** — the analogue S-meter beside the gain controls: a needle
+over a printed dial, S1 to S9 and then +20/+40/+60 dB, drawn either in the dark
+face of the later radios or the cream one of the older analogue sets (**Face**).
+The scale is the IARU recommendation — S9 is −73 dBm, i.e. 50 µV into 50 Ω at
+the antenna socket, and each S unit below it is 6 dB — and the needle has the
+recommended quasi-peak ballistics: up in about 10 ms, down with a 500 ms time
+constant, with a **Peak** marker holding the highest level for half a second so
+a signal that comes and goes between two repaints is not missed. The exact
+figure is printed along the foot of the face as well ("S9 +20 dB   −53 dBm
+−25.0 dBFS"), because a needle can only be read to its own marks.
+
+It measures the level *inside the filter you are listening to*, taken before the
+audio AGC, the noise reduction, the squelch and the volume. So it does not
+follow the volume control, it does not care how hard the NR is working, and it
+still shows a signal you cannot hear because the squelch is shut — measured, the
+level it reads is bit-for-bit the same with the volume at 2 % as at full, and a
+receiver that is silent because the squelch closed reads its signal as ever. A
+carrier 18 kHz away moves the status bar's level but not the needle (15.7 dB
+against 0.00 dB in the chain test). What it will *not* do is pretend to an
+absolute accuracy the hardware has not got: the level comes from the ADC after
+the gain stages, so a dBFS figure means nothing until something known is
+attached, and the meter asks for that one number as **S9 at** — the dBFS
+reading that is to count as S9. The default comes from measurements on a real
+RSP1 (2 MSps, 6 kHz AM, the default IF gain of 40 dB): a whole band of HF noise
+reads S6.7 on 31 m, S6.2 on 41 m and S5.3 on 19 m, and a 10 dB change of gain
+moves the needle by exactly 10 dB (measured at 9.805 MHz: −71.9 dBFS with the
+IF gain box at 50, −61.9 at 40), which is what makes one calibration hold
+wherever the gain is left. The low end of the scale is the calibration's
+business rather than the hardware's: S1 is −121 dBm, under this receiver's own
+noise floor even at its lowest gain, where the noise still reads S3.8. Attach a
+signal generator, or tune something of known strength and read what `--selftest`
+says it is, set
+**S9 at** to that and the whole scale follows — including the reading the
+headless report prints. Switching the receiver off drops the needle
+back to its rest rather than leaving it standing at the last signal, so a frozen
+reading can never be mistaken for a station still being heard.
+
 **Audio** — volume, mute, an audio AGC (worth leaving on for shortwave), and a
 squelch in dB.
 
@@ -150,6 +201,63 @@ than from the signal itself. On a noisy keyed carrier, level 75 buys about
 **4 dB of signal-to-noise** and drops the noise between words by **13 dB**.
 Higher settings keep quieting the gaps, at the cost of a slightly narrowed
 tone. NR adds roughly 5 % of one core.
+
+**FT8** — press `FT8` in the mode row and that is the whole of it. The receiver
+is put in USB with a 3 kHz filter and the strip along the foot of the window
+comes up: a **FT8 band** list of the standard dial frequencies (160 m to 2 m),
+the slot clock, and a list of what has been decoded.
+
+FT8 is 15-second slots of text starting on the UTC quarter-minute, and it is not
+a mode you listen to. The **FT8 band** list holds the dial frequencies WSJT-X
+uses — the signal sits *above* the dial, so on 20 m the dial is 14.074 MHz and a
+message decoded at 1500 Hz came from 14.0755 MHz — and picking one tunes the
+receiver there. Decoding runs continuously: each slot's audio is sent to WSJT-X's
+`jt9` while the next slot is already being received, which is why a slow decoder
+drops a slot rather than falling behind the band.
+
+The list has one line per decoded message — UTC, dB, DT, the audio offset, and
+the message — newest at the bottom, and **clicking a line tunes to the frequency
+that message was heard on**, because the frequency is the only thing about a
+decode worth acting on. **Clear** empties the list; unticking **Every slot**
+decodes the next slot and stops. The readout beside them says where the slot
+clock is ("slot 221315  4.2/15 s"), whether it is decoding, and the totals; if
+the decoder is behind, or the receiver is stopped, it says that instead of
+counting down to nothing.
+
+Entering the mode also switches **off** three settings that are good for
+listening and bad for decoding — noise reduction, the audio AGC and the squelch
+— because each of them subtracts from the signal `jt9` has to correlate against;
+it estimates its own noise floor, and what it wants is the passband as it
+arrived. A **memory channel** saved while in FT8 mode comes back in it.
+
+FT8 needs WSJT-X's `jt9` (`sudo apt install wsjtx`). Without it the mode still
+works as a receiver and says what is missing rather than failing every slot; the
+`--check` output names the decoder, or how to get one.
+
+**Nothing has to be set up twice.** Every control is written down as you change
+it — the frequency, mode and filter, the CW pitch, the gains, the volume, the
+noise reduction and how hard it works, the squelch, the FFT size, the tuning
+step, the zoom, the waterfall's colours, levels and detail, the meter's S9
+calibration, its peak marker and which face it is drawn with, the FT8 band and
+whether it decodes every slot — and read back the next time the window opens,
+along with the window's own size, place and maximised state and the divider
+between the two plots. A window that was maximised comes back maximised, and
+the size it un-maximises to is the one you chose, not the screen's. The file is `~/.config/rspsdr/settings.json` (honouring
+`$XDG_CONFIG_HOME`), written atomically, and a value in it that cannot be used
+costs that one setting rather than the window: a half-written or hand-edited
+file still opens, on the defaults for whatever it could not supply. Mute is
+deliberately *not* remembered — a receiver that comes back silent looks like a
+fault. The command line still wins wherever it is used, so
+`rspsdr --freq 14074000` goes where it is told while everything else comes back
+as it was, and a mode with no `--bw` gets that mode's own filter rather than the
+one belonging to the mode being left behind. The headless commands
+(`--selftest`, `--wav`, `--ft8`, `--save-memory`) deliberately ignore the file,
+so a script gets the same result every time whatever the window last saved.
+`rspsdr --reset-settings` clears what was remembered and opens on the defaults.
+Three settings are *borrowed* rather than changed: entering FT8 switches off the
+noise reduction, the audio AGC and the squelch, and leaving the mode puts each
+of them back — unless you have changed one in the meantime, which makes it
+yours — so closing the window in FT8 does not cost you your listening settings.
 
 **Memory channels** — save the frequency and the settings that suit it (mode,
 filter width, CW pitch) and come back to it later. **Save current…** prompts for
@@ -215,7 +323,9 @@ different span and no longer mean what the colour scale says.
 
 The window opens at a size that fits the display, and its control rows wrap, so
 it can be shrunk or maximised on a screen that is narrower than the controls
-would otherwise demand.
+would otherwise demand. With the FT8 strip up, the decode list shortens from six
+rows to three as the window approaches its smallest size, so the plots keep
+their room: at 780×560 the strip costs each plot 21 px, measured.
 
 ## Command line
 
@@ -227,6 +337,9 @@ would otherwise demand.
 --rate               sample rate (default 2 MSps)
 --gain/--agc         RF gain, IF gain in dB, RF AGC
 --nr/--nr-level      noise reduction on, and how hard (0..100)
+--ft8                decode FT8 headless and print it (see --freq as the dial)
+--mode ft8           open the GUI in FT8 mode, decoder armed
+--reset-settings     forget what was remembered; open on the defaults
 --memories           list saved memory channels, then exit
 --save-memory NAME   save the given frequency/mode as a memory channel
 --audio-backend      auto | pipe | qt
@@ -243,6 +356,12 @@ rspsdr --wav 41m.wav --duration 30 --freq 7255000 --mode am
 # save a channel, then list what is saved
 rspsdr --save-memory "20m FT8" --freq 14074000 --mode usb
 rspsdr --memories
+
+# listen to 40 m FT8 for a minute and print every message decoded
+rspsdr --ft8 --freq 7074000 --duration 60
+
+# back to a known state, having cleared everything the window remembered
+rspsdr --reset-settings
 ```
 
 ## How it works
@@ -253,7 +372,15 @@ RSP1 ──► IQ @ 2 MSps ──┬─► spectrum (Welch FFT) ──► spectr
                        └─► mix to baseband ──► decimate chain ──► 48 kHz
                                                       │
                             mode filter ──► demod ──► NR ──► AGC ──► audio
+                                                      │
+                                       (FT8)  decimate to 12 kHz ──► 15 s slot
+                                                      ──► WAV ──► jt9 ──► list
 ```
+
+The FT8 tap is taken from the demodulated audio, before NR, AGC, volume and
+mute: the decoder wants the passband as it arrived, and with the mode armed the
+three settings that would otherwise have processed it are switched off. jt9 runs
+in a fourth thread of its own, so a decode in progress never delays the audio.
 
 Three threads: a **reader** owns the SoapySDR handle and performs every device
 call (retunes and gain changes are queued to it, so no other thread ever touches
@@ -298,6 +425,16 @@ A few decisions worth knowing about:
   window is shifted once on the averaged line rather than once per segment, and
   the test suite pins the result against a plain `numpy.fft` reference so the
   next version of either library cannot quietly change the numbers.
+- **The waterfall is drawn over exactly the window the axis shows.** The
+  picture is placed by handing the plot the new row and *then* its rectangle:
+  an `ImageItem` scales a rectangle by the width of the image it already holds
+  (pyqtgraph's own warning is that `setRect` "cannot be used before an image is
+  assigned"), so a rectangle applied first came from the previous column count
+  and the picture was drawn at the wrong horizontal scale — 37.6 MHz of span
+  inside a 2 MHz window on the first frame, and the width ratio out again after
+  any resize or detail change. The axis, and every click and drag, stayed
+  correct throughout, so what it looked like was a waterfall that tuned to the
+  wrong frequency.
 - **The waterfall is pixels, not dB values.** Two copies of the history are
   kept: the dB rows, which are the truth, and the RGBA pixels the plot draws.
   Both follow the display: one column per pixel of plot width (so nothing is
@@ -313,10 +450,19 @@ A few decisions worth knowing about:
   by integrated graphics every line is rasterised on the CPU, and Qt's
   antialiased path cost 81 ms a frame against 21 ms without it — two thirds of
   the frame budget, spent smoothing a 1 px grid. The waterfall image, which is
-  the one thing that does want interpolation, asks for it by itself.
-- **Under CPU pressure the radio stays live.** If the DSP cannot keep up, the
-  oldest RF is discarded rather than letting latency grow without bound. The
+  the one thing that does want interpolation, asks for it by itself.- **Under CPU pressure the radio stays live.** If the DSP cannot keep up,
+  the oldest RF is discarded rather than letting latency grow without bound. The
   status bar shows the backlog and a drop count.
+- **A stream that dies is noticed and taken up again.** Unplugging the radio,
+  restarting the SDRplay service or a driver wedged after a resume all look the
+  same from the reader thread: `readStream` stops returning samples, with no
+  error to raise. Reading it again is what used to happen for ever, leaving a
+  frozen waterfall and a Stop button that stopped nothing. Three seconds of
+  silence — hundreds of blocks at the slowest rate the radio offers, and never
+  counted while the radio is being stopped on purpose — now ends the stream
+  properly: both threads stop, the window releases the device and looks for it
+  again with the same retry it uses at startup, and the picture comes back when
+  the radio does.
 
 ## Verifying it
 
@@ -328,6 +474,9 @@ python3 tests/test_units.py                     # every helper, no radio needed
 python3 tests/test_chain.py                     # whole receive chain, no radio
 python3 tests/test_dsp.py                       # DSP correctness + throughput
 python3 tests/test_memory.py                    # saved-channel store
+python3 tests/test_prefs.py                     # settings remembered between runs
+python3 tests/test_startup.py                   # device busy at startup, no radio
+python3 tests/test_ft8.py                       # FT8 decoding, no radio
 python3 tests/gui_smoke.py --shot gui.png       # GUI against the real radio
 python3 tests/real_display_check.py             # window manager + installed copy
 python3 tests/check_wav.py recording.wav        # is a recording real audio?
@@ -341,14 +490,66 @@ no step at a block edge), the squelch, `Spectrum` (a tone lands in the bin its
 frequency says, a full-scale tone reads 0 dBFS, averaging blends frames), the
 int16 conversion, the audio output's buffering driven by a stub backend (volume,
 mute, overruns, drain, and that a write after `close()` cannot start another
-player), the settings, the band plan against the presets, and the config
-directory migration.
+player), the settings, the band plan against the presets, the config
+directory migration, and the signal meter's scale — S9 at −73 dBm, 6 dB per
+unit, the standard's 10 dB steps above it, and the readings an operator would
+say — plus its dial (evenly spaced marks, every mark pointing where it is drawn,
+a level round-tripping through the needle to within half a mark, the arc
+monotonic across its whole range) and the needle's ballistics (63 % of a step in
+one attack time, the decay no faster than its constant, a half-second hold, and
+the peak never below the needle).
 
 `tests/test_chain.py` drives `Radio._process_frame` — the function the streaming
 thread calls — with synthetic IQ, so the whole path runs with no hardware
 attached: every sample rate against several FFT sizes, the carrier's bin in the
 spectrum, every demodulator mode recovering the tone it should, frames surviving
-a change of sample rate, and the level meter agreeing with the spectrum.
+a change of sample rate, and the level meter agreeing with the spectrum. The
+level the needle reads has its own section: 6.02 dB for every halving of the
+carrier, one S unit per halving either side of S9, the same level with the noise
+reduction on, the audio AGC on, the volume at 2 % and the squelch shut (silent
+audio, and it still reads the signal), and a carrier 18 kHz away moving the
+baseband level by 15.7 dB while the meter reads its own passband unchanged.
+
+`tests/test_startup.py` covers starting up with no radio at all, which is the
+one case the hardware suites cannot produce: it stands in for the SoapySDR
+module and the audio backend, so a device can be made busy to order. It checks
+which open failures are worth waiting for (`no available RSP devices found`,
+`in use`, `not ready`) and which are reported at once rather than hidden behind
+a retry (missing bindings, an unknown driver); that a failure part-way through
+`Radio.open()` unmakes the device it had made, leaves no worker threads behind,
+and leaves the object able to open normally on the next attempt; that the
+retry policy backs off from one second to five, gives up after the budget rather
+than hammering the front end, and that the window keeps working while it waits
+— Start still starts, Stop cancels the wait, and when the device frees up the
+window begins streaming unattended, with the device name back in the header and
+the "trying again" message gone from the status bar. It also covers the stream
+dying underneath a running receiver: that a stream which is *delivering* samples
+is never mistaken for a dead one (the false positive that would reopen the radio
+while somebody is listening to it), that silence is reported once, ends both
+threads and leaves the device for the owner to release, that stopping the radio
+on purpose is not reported as a loss — the rate change that closes and reopens
+the stream would otherwise report a loss it caused itself — and that the window
+gives the device up, says why, and streams again unattended once it is back.
+
+`tests/test_ft8.py` covers FT8 with neither a radio nor a sound card: the band
+presets against the published WSJT-X dial frequencies, the slot arithmetic
+(including the microsecond of slack that keeps a block starting a hair early on
+the grid), parsing `jt9`'s output (negative SNRs, hashed callsigns, compound
+`RR73` messages, trailing spaces, and the lines around a decode that are not
+decodes), the WAV handed over (mono, 16-bit, 12 kHz, exactly one slot, one gain
+for the whole slot so a weak signal beside a strong one keeps its level), the
+48 kHz → 12 kHz decimation (a tone's level and frequency survive, anything above
+the new Nyquist is filtered out rather than folded in, and the output does not
+depend on the block sizes it is fed), and ten minutes of synthetic audio through
+the spotter — forty boundaries, forty slots, none dropped, none twice. The last
+section is the honest one: WSJT-X's `ft8sim` encodes a known message, that audio
+is handed to the spotter exactly as the receiver would deliver it, and the real
+`jt9` decodes it — message, frequency, slot and SNR all checked (it is skipped,
+loudly, when WSJT-X is not installed). The window checks include that the
+receiver is never handed the mode name "ft8" (which would raise), that selecting
+the mode brings the strip up and disarms it again on the way out, that a decoded
+slot appears with its frequencies and tunes on a click, and that `--mode ft8`
+opens with the decoder already armed.
 
 `tests/test_dsp.py` checks every RSP1 sample rate's decimation plan, that block
 processing equals single-shot processing, alias rejection, that each demodulator
@@ -357,7 +558,23 @@ checks exact reconstruction, that a clean keyed carrier and an unkeyed carrier
 both pass with unity gain, that SNR improves monotonically with the level
 setting, and that the cost fits the realtime budget. `tests/test_memory.py`
 covers sorting, replacement by name, persistence, atomic writes and damaged
-files. `tests/gui_smoke.py` opens the real device, waits for frames, exercises
+files. `tests/test_prefs.py` is about the *second* run: it changes twenty-three
+controls of a real (offscreen, unopened) window as a listener would, closes it,
+opens it again and requires every one of them back, including the window's size
+and place, the borrowed FT8 settings and the meter's calibration, peak marker
+and face (down to the widget: the level it was calibrated at comes back as
+S9); it also covers the ground a restart
+cannot show — every value in the table accepted and refused (an out-of-range
+number, a NaN, a boolean where an integer belongs, a mode the receiver would
+raise on, a transform that is not a power of two), a file that is not JSON, a
+list or an empty file reading as "nothing remembered", one unusable value costing
+that value and not the file, no half-written temporary file being left behind,
+keys a future version wrote being kept, the command line overriding the file only
+where it is typed (a `store_true` flag that was *not* typed leaving the
+remembered yes alone), a headless run ignoring the file altogether,
+`--reset-settings`, `--screenshot` remembering nothing, and a remembered position
+off the edge of every screen being ignored rather than applied.
+`tests/gui_smoke.py` opens the real device, waits for frames, exercises
 every control (including saving, recalling and deleting a memory, switching NR
 on, the waterfall levels/colour/detail/zoom, and retuning while zoomed) and
 writes a screenshot. The waterfall's resolution is checked against frames of a
@@ -375,7 +592,18 @@ expensive than it is fails the run instead of being noticed on the radio. It
 clicks the waterfall with a real mouse event and checks the
 tuning lands on the frequency the axis shows there, that the spectrum and
 waterfall put a given frequency at the same pixel, and that each mode's passband
-is drawn on the right side of the dial. It also checks the window itself: that
+is drawn on the right side of the dial. It also checks the picture against the
+axis it is drawn in — the placed rectangle has to cover exactly the window the
+axis shows, at *Screen*, at 2400 columns and at 6400, measured from the axis
+range and the plot rectangle rather than from the plot's own transform — and
+drags a real mouse event across the waterfall to check that the receiver centre
+stays put while the button is down, that the tuning follows the pointer, and
+that the window follows the dial only once the button is up. It paints the
+signal meter with known levels and reads the pixels back: the red needle has to
+be where the dial geometry puts its tip, either side of centre, and the
+half-second peak marker has to still be holding a signal the needle has left
+behind — with both faces drawn and a switch between them changing the picture. It
+also checks the window itself: that
 it fits and maximises on the screen, and that no wrapping row leaves a label on
 one line and its control on the next. It drives the real Qt event loop, because
 polling the GUI from a tight `processEvents()` loop starves the DSP thread and
@@ -405,6 +633,20 @@ inside a 45 ms budget rather than 11.7. A fixed 6400-column waterfall costs
 ## What the last audit found
 
 Every item below was reproduced first and re-measured afterwards.
+
+- **FT8 decoded the first slot and then stopped for ever.** A slot is 180000
+  samples, and the collector worked out where the *next* slot began by asking
+  the audio clock again for the next multiple of fifteen seconds. A slot's
+  worth of additions of 1/12000 s drifts by a few microseconds, and a few
+  microseconds *past* a boundary made that question return the boundary after
+  the one it meant — so it skipped to the slot after that, and the one after
+  that, discarding fifteen seconds of perfectly good audio each time. Nothing
+  reported it: the strip said it was listening to every slot. The grid is now
+  advanced by whole slots from the slot just finished, with the clock consulted
+  only to find the first one, and a slot that begins a hair late is stamped
+  with the boundary it is inside. Measured over ten minutes of synthetic audio:
+  **40 boundaries, 40 slots captured**; the version before this change
+  captured **one**.
 
 - **The waterfall drew every frequency to the left of where the axis said it
   was.** Pooling bins into columns grouped the first `k·columns` of them and
@@ -463,6 +705,22 @@ radio nor a sound card.
 and `SoapySDRUtil --find`. If SoapySDR sees the radio but the app does not, the
 Python bindings (`python3-soapysdr`) are probably missing.
 
+**The waterfall freezes and the status bar stops counting** — the radio stopped
+streaming, usually because it was unplugged or the SDRplay service restarted.
+The window notices within three seconds, says so, closes the device and starts
+looking for it again by itself, so plugging it back in is enough — you do not
+have to restart the program. If it cannot be found within five minutes it says
+so and waits for **Start**.
+
+**"the SDRplay device is busy"** — the RSP1 serves one program at a time, so
+another program has it: SDRuno, `SoapySDRUtil`, or a second copy of this one
+(`pgrep -a rspsdr`). The app does not give up on it: it says so in the status
+bar, keeps asking once a second at first and then every five, and starts
+streaming by itself the moment the other program lets go — no restart needed.
+It stops asking after five minutes without the device and says so; press
+**Start** to begin again. While the device is held it cannot even be listed, so
+the header says *busy* rather than *no SDR found*.
+
 **No audio** — `--check` prints the player it will use (`pacat`, `pw-play` or
 `aplay`). Try `--audio-backend qt` to use Qt's own audio path instead.
 
@@ -495,9 +753,20 @@ tuning accepts any frequency, but the presets and band data are aimed at HF.
   which suits AM/SSB/CW/NFM but not 200 kHz-wide FM.
 - Ham band edges follow the IARU **Region 2** plan.
 - Recording (`--wav`) is headless only; the GUI does not record yet.
+- A stream that has gone quiet is only declared dead after three seconds —
+  long enough that the check cannot fire on a scheduling hiccup, short enough
+  that an unplug is noticed while you are still looking at the screen. The
+  threshold is one constant in [radio.py](rspsdr/radio.py).
 - Noise reduction is a broadband hiss reducer: it cannot remove an interfering
   carrier, an adjacent channel or a heterodyne whistle, and it will not dig a
   signal out of noise it cannot resolve.
+- What the window remembers is deliberately not *everything*: mute, the
+  band and preset pickers and the plot's peak marker are transient, and a
+  remembered setting that makes the receiver look broken (silence, or a
+  frequency you cannot explain) is worse than one you have to set again. The
+  list of what is stored is one table, [prefs.py](rspsdr/prefs.py)'s
+  `RADIO_FIELDS`, and a test requires it to cover every field of the settings
+  object, so a new control cannot be added and silently forgotten.
 - Memories are one flat list, sorted by frequency, rather than named banks.
 
 ## License

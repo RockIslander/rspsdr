@@ -55,21 +55,30 @@ import pyqtgraph as pg
 # asks for it on its own in FastImage below.
 pg.setConfigOptions(useOpenGL=False, antialias=False)
 
-from PyQt6.QtCore import QPoint, QRect, QSize, Qt, QObject, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QPainter
+from PyQt6.QtCore import (QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt,
+                          QTimer, pyqtSignal)
+from PyQt6.QtGui import (QBrush, QColor, QFont, QLinearGradient, QPainter,
+                         QPainterPath, QPen)
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout,
-    QInputDialog, QLabel, QLayout, QMainWindow, QMessageBox, QPushButton,
-    QSlider, QSplitter, QVBoxLayout, QWidget,
+    QHeaderView, QInputDialog, QLabel, QLayout, QMainWindow, QMessageBox,
+    QPushButton, QSlider, QSplitter, QTableWidget, QTableWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
-from . import bands, logo
+from . import bands, ft8, logo, prefs, smeter
 from .memory import Channel, MemoryStore
-from .radio import TUNER_BANDWIDTHS, Radio, Settings, list_devices
+from .radio import (TUNER_BANDWIDTHS, Radio, Settings, list_devices,
+                    transient_open_error)
 
 MODES = [
     ("AM", "am", 6000.0), ("SAM", "sam", 6000.0), ("USB", "usb", 2400.0),
     ("LSB", "lsb", 2400.0), ("CW", "cw", 500.0), ("NFM", "nfm", 12500.0),
+    # FT8 sits with the other mode buttons because that is where a listener
+    # looks for it, but it is not a demodulator: the receiver is put in USB
+    # with a 3 kHz filter (see ft8.receiver_mode) and what makes the mode FT8
+    # is the decoder behind it, in rspsdr/ft8.py.
+    ("FT8", "ft8", ft8.FILTER_BW),
 ]
 MODE_BW = {m[1]: m[2] for m in MODES}
 
@@ -172,6 +181,27 @@ WF_BLANK_DB = -200.0
 
 REPAINT_MS = 45
 
+# How long after the last change the settings file is written.  A slider being
+# dragged is one setting changing a hundred times; the file is small, but not
+# that small, and nothing is gained by writing it while the pointer is down.
+PREFS_SAVE_MS = 1500
+
+# The squelch FT8 sets while it is listening: off, so that nothing subtracts
+# from the audio the decoder is fed.  Remembered before it is applied, and put
+# back when the mode is left (see _ft8_prepare).
+FT8_SQUELCH_DB = -140.0
+
+# --- the FT8 strip ------------------------------------------------------
+# The decoder list is a table rather than a text block because every row is
+# also a tuning button: the whole point of a decode is the frequency it was
+# heard on.  Monospaced, left to right: UTC, dB, DT, audio offset, message.
+FT8_COLS = [("UTC", 58), ("dB", 34), ("DT", 40), ("Audio", 46), ("Message", 0)]
+FT8_ROWS = 6                    # visible decodes; the rest scroll off the top
+FT8_MIN_ROWS = 3                # the strip yields height to the plots when the
+                                # window is at its smallest
+FT8_KEEP = 400                  # rows held before the oldest are dropped
+FT8_ROW_PX = 16
+FT8_READOUT_MS = 200            # how often the slot clock redraws
 
 
 def make_colormap() -> pg.ColorMap:
@@ -361,6 +391,7 @@ class SpectrumPlot(pg.PlotWidget):
     recentre = pyqtSignal(float)
     stepped = pyqtSignal(int)
     cursor = pyqtSignal(float)
+    settled = pyqtSignal(float)          # see WaterfallPlot.settled
 
     def __init__(self):
         super().__init__()
@@ -393,6 +424,8 @@ class SpectrumPlot(pg.PlotWidget):
         self._center = 0.0
         self._span = 1.0
         self._dragging = False
+        # The pixel-to-frequency mapping frozen for the duration of a drag.
+        self._drag_map = None
         self._y_lo, self._y_hi = -130.0, -20.0
         self._y_applied = (-130.0, -20.0)
         self._x_applied = (0.0, 0.0)
@@ -474,27 +507,60 @@ class SpectrumPlot(pg.PlotWidget):
             self._x_applied = lim
             self.setXRange(lim[0], lim[1], padding=0)
 
-    def _freq_at(self, pos) -> float | None:
-        if self._freqs is None:
+    def _axis_px_map(self):
+        """(frequency Hz at x=0, Hz per pixel) along the axis as drawn.
+
+        Sampled from the plot's own transform -- what the frequency scale under
+        the picture is drawn from -- at the two edges of the plotting area and
+        with a y inside it.  Reconstructing it from the axis range and the
+        widget's rectangle instead disagreed with the drawn scale by about a
+        pixel (half a bin at a 4096-point FFT), and a point outside the box can
+        be mapped through a degenerate axis and come back not-a-number, which
+        would silently turn a click into no tune at all.
+        """
+        vb = self.plotItem.vb
+        r = vb.sceneBoundingRect()
+        if r.width() <= 0.0:
             return None
-        p = self.plotItem.vb.mapSceneToView(pos)
-        if self._freqs.size < 2:
+        y = r.center().y()
+        f0 = vb.mapSceneToView(QPointF(r.left(), y)).x() * 1e6
+        f1 = vb.mapSceneToView(QPointF(r.right(), y)).x() * 1e6
+        if not f0 == f0 or not f1 > f0:                 # NaN, or no span
             return None
+        per_px = (f1 - f0) / r.width()
+        return (f0 - r.left() * per_px, per_px)
+
+    def _freq_at(self, pos, mapping=None) -> float | None:
+        """The frequency under a pixel, snapped to the nearest bin shown.
+
+        While a drag is in progress the caller passes the mapping frozen at the
+        moment the button went down, so nothing that repaints during the
+        gesture -- a re-centre commanded just before it, a resize, the window
+        following the dial -- can change the frequency under the pointer.
+        """
+        if self._freqs is None or self._freqs.size < 2:
+            return None
+        m = mapping if mapping is not None else self._axis_px_map()
+        if m is None:
+            return None
+        f0, per_px = m
         step = self._freqs[1] - self._freqs[0]
-        k = int(round((p.x() * 1e6 - self._freqs[0]) / step))
+        k = int(round((f0 + pos.x() * per_px - self._freqs[0]) / step))
         k = max(0, min(k, self._freqs.size - 1))
         return float(self._freqs[k])
 
     def mousePressEvent(self, ev):
+        m = self._axis_px_map()
         if ev.button() == Qt.MouseButton.LeftButton:
-            f = self._freq_at(ev.position())
+            f = self._freq_at(ev.position(), m)
             if f is not None:
                 self._dragging = True
+                self._drag_map = m
                 self.tuned.emit(f)
                 ev.accept()
                 return
         elif ev.button() == Qt.MouseButton.RightButton:
-            f = self._freq_at(ev.position())
+            f = self._freq_at(ev.position(), m)
             if f is not None:
                 self.recentre.emit(f)
                 ev.accept()
@@ -504,7 +570,7 @@ class SpectrumPlot(pg.PlotWidget):
     def mouseMoveEvent(self, ev):
         pos = ev.position()
         if self._dragging:
-            f = self._freq_at(pos)
+            f = self._freq_at(pos, self._drag_map)
             if f is not None:
                 self.tuned.emit(f)
             ev.accept()
@@ -515,7 +581,12 @@ class SpectrumPlot(pg.PlotWidget):
         super().mouseMoveEvent(ev)
 
     def mouseReleaseEvent(self, ev):
-        self._dragging = False
+        was, mapping = self._dragging, self._drag_map
+        self._dragging, self._drag_map = False, None
+        if was:
+            f = self._freq_at(ev.position(), mapping)
+            if f is not None:
+                self.settled.emit(f)
         super().mouseReleaseEvent(ev)
 
     def wheelEvent(self, ev):
@@ -531,6 +602,11 @@ class WaterfallPlot(pg.PlotWidget):
     # a wheel over the *spectrum* already steps the tuning and the two would
     # otherwise be indistinguishable to a user who is looking at the picture.
     zoom = pyqtSignal(int)
+    # A pointer gesture finished, at this frequency.  The window is allowed to
+    # follow the dial only here: a recentre while the pointer is down moves the
+    # picture out from under it, so the frequency under the cursor jumps by up
+    # to half a window and a drag tunes in steps instead of tracking.
+    settled = pyqtSignal(float)
 
     def __init__(self):
         super().__init__()
@@ -576,6 +652,8 @@ class WaterfallPlot(pg.PlotWidget):
         self._x_applied = (0.0, 0.0)
         self._rect_applied = None
         self._dragging = False
+        # The pixel-to-frequency mapping frozen for the duration of a drag.
+        self._drag_map = None
         self.img.setImage(self._rgba, autoLevels=False, levels=None)
         self._laid_out = True
 
@@ -654,8 +732,17 @@ class WaterfallPlot(pg.PlotWidget):
         self._rgba[..., 3] = 255
         self._rows, self._cols = rows, cols
         self._repaint_history()
-        self._apply_rect()
+        # Hand the new array over *before* placing it.  setRect scales by the
+        # image the item already holds -- pyqtgraph's own warning is that it
+        # "cannot be used before an image is assigned" -- so a rect applied
+        # first was built from the *previous* column count and the picture was
+        # drawn at the wrong horizontal scale: 37.6 MHz of span over a 2 MHz
+        # window on the very first frame, and the width ratio out again after
+        # any resize.  The axis and the click mapping stayed correct, so what a
+        # user saw was a waterfall that tuned to the wrong frequency.
+        self._rect_applied = None
         self.img.setImage(self._rgba, autoLevels=False, levels=None)
+        self._apply_rect()
 
     # ------------------------------------------------------------ colour
     def _quantise(self, db: np.ndarray, out: np.ndarray):
@@ -744,8 +831,10 @@ class WaterfallPlot(pg.PlotWidget):
         self._lo, self._hi = self._levels_now()
         self._rgba[1:] = self._rgba[:-1]
         self._quantise(row, self._rgba[0])
-        self._apply_rect()
+        # Image first, then its rectangle -- see _resize_image.  The shape does
+        # not change here, so this is belt and braces on the same trap.
         self.img.setImage(self._rgba, autoLevels=False, levels=None)
+        self._apply_rect()
 
     @staticmethod
     def _pool(vis: np.ndarray, cols: int) -> np.ndarray:
@@ -811,18 +900,48 @@ class WaterfallPlot(pg.PlotWidget):
             self.setXRange(lim[0], lim[1], padding=0)
             self.setYRange(0, self._rows, padding=0)
 
-    def _freq_at(self, pos) -> float | None:
-        if self._hi_freq <= self._lo_freq:
+    def _axis_px_map(self):
+        """(frequency Hz at x=0, Hz per pixel) along the axis as drawn.
+
+        Sampled from the plot's own transform, at the two edges of the plotting
+        area and with a y inside it, for the reasons spelled out on
+        :meth:`SpectrumPlot._axis_px_map`.
+        """
+        vb = self.plotItem.vb
+        r = vb.sceneBoundingRect()
+        if r.width() <= 0.0:
             return None
-        p = self.plotItem.vb.mapSceneToView(pos)
-        f = p.x() * 1e6
+        y = r.center().y()
+        f0 = vb.mapSceneToView(QPointF(r.left(), y)).x() * 1e6
+        f1 = vb.mapSceneToView(QPointF(r.right(), y)).x() * 1e6
+        if not f0 == f0 or not f1 > f0:                 # NaN, or no span
+            return None
+        per_px = (f1 - f0) / r.width()
+        return (f0 - r.left() * per_px, per_px)
+
+    def _freq_at(self, pos, mapping=None) -> float | None:
+        """The frequency under a pixel, clamped to the window on screen.
+
+        While a drag is in progress the caller passes the mapping frozen at the
+        moment the button went down.  Nothing that repaints during a gesture --
+        a re-centre commanded just before it, a resize, the window following the
+        dial -- may then change the frequency under the pointer, which is what
+        made a drag feel like it tuned in steps instead of following the hand.
+        """
+        m = mapping if mapping is not None else self._axis_px_map()
+        if m is None or self._hi_freq <= self._lo_freq:
+            return None
+        f0, per_px = m
+        f = f0 + pos.x() * per_px
         return float(min(max(f, self._lo_freq), self._hi_freq))
 
     def mousePressEvent(self, ev):
         if ev.button() == Qt.MouseButton.LeftButton:
-            f = self._freq_at(ev.position())
+            m = self._axis_px_map()
+            f = self._freq_at(ev.position(), m)
             if f is not None:
                 self._dragging = True
+                self._drag_map = m
                 self.tuned.emit(f)
                 ev.accept()
                 return
@@ -830,7 +949,7 @@ class WaterfallPlot(pg.PlotWidget):
 
     def mouseMoveEvent(self, ev):
         if self._dragging:
-            f = self._freq_at(ev.position())
+            f = self._freq_at(ev.position(), self._drag_map)
             if f is not None:
                 self.tuned.emit(f)
             ev.accept()
@@ -838,7 +957,12 @@ class WaterfallPlot(pg.PlotWidget):
         super().mouseMoveEvent(ev)
 
     def mouseReleaseEvent(self, ev):
-        self._dragging = False
+        was, mapping = self._dragging, self._drag_map
+        self._dragging, self._drag_map = False, None
+        if was:
+            f = self._freq_at(ev.position(), mapping)
+            if f is not None:
+                self.settled.emit(f)
         super().mouseReleaseEvent(ev)
 
     def wheelEvent(self, ev):
@@ -855,11 +979,317 @@ class Bridge(QObject):
     spectrum = pyqtSignal(float, object, float)
     status = pyqtSignal(object)
     error = pyqtSignal(str)
+    lost = pyqtSignal(str)          # the stream died and the device needs reopening
+    ft8_decodes = pyqtSignal(object, object)   # list[ft8.Decode], slot datetime
+    ft8_status = pyqtSignal(str)
+    ft8_error = pyqtSignal(str)
+
+
+# ---------------------------------------------------------------- the meter
+#
+# Drawing the analogue signal meter.  The scale (IARU S units), the dial's
+# geometry and the needle's ballistics all live in rspsdr/smeter.py; what is
+# here is the picture, and the level it is fed.
+
+
+class SMeter(QWidget):
+    """An analogue S-meter: a needle over a printed dial.
+
+    Fed one sample of the demodulator's passband level at a time, along with
+    how long it has been since the last one, so that the needle's rise and fall
+    are the recommended quasi-peak ones rather than whatever the repaint rate
+    happens to be.
+
+    Everything it draws is also available as numbers -- :meth:`needle`,
+    :meth:`peak_needle`, :meth:`reading_text` -- because a meter that is only
+    ever checked by looking at it has not been checked.
+    """
+
+    def __init__(self, ref_dbfs: float | None = None, face: str = "dark",
+                 peak: bool = True, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.dial = smeter.Dial()
+        self.ball = smeter.Ballistics()
+        self.ref_dbfs = float(smeter.DEFAULT_REF_DBFS if ref_dbfs is None
+                              else ref_dbfs)
+        self.face = face if face in smeter.FACES else "dark"
+        self.peak_on = bool(peak)
+        self.level_dbfs = -200.0        # the passband level, as last measured
+        self.dbm = smeter.DIAL_LO_DBM   # what the needle is showing
+        self.peak_dbm = smeter.DIAL_LO_DBM
+        self.setFixedSize(smeter.WIDTH, smeter.HEIGHT)
+        self.setToolTip(
+            "Signal strength on the IARU scale: S9 is -73 dBm (50 uV into "
+            "50 ohms), each S unit below it is 6 dB, and above it the steps "
+            "are 10 dB.\n"
+            "Measured in the passband being listened to, before the audio AGC "
+            "and the volume, so it does not follow the volume control.\n"
+            "The needle rises in ~10 ms and falls with a 500 ms time constant, "
+            "which is the recommended quasi-peak response; the yellow marker "
+            "holds the highest level for half a second.\n"
+            "“S9 at” is the level that reads S9 -- set it so the meter agrees "
+            "with a station or signal generator of known strength.")
+
+    # -- the level ----------------------------------------------------
+    def feed(self, dbfs: float, dt: float) -> None:
+        """One passband level in dBFS, and the seconds since the last one."""
+        self.level_dbfs = float(dbfs)
+        value, peak = self.ball.update(smeter.dbm_for_dbfs(dbfs, self.ref_dbfs),
+                                       dt)
+        self.dbm = self._clamp(value)
+        self.peak_dbm = self._clamp(peak)
+        self.update()
+
+    def reset(self) -> None:
+        """Back to rest, as though the radio had only just been switched on."""
+        self.ball.reset()
+        self.level_dbfs = -200.0
+        self.dbm = self.peak_dbm = smeter.DIAL_LO_DBM
+        self.update()
+
+    def set_ref(self, ref_dbfs: float) -> None:
+        """Say which level reads S9, and start the needle again from rest."""
+        self.ref_dbfs = float(ref_dbfs)
+        self.ball.reset()
+        self.update()
+
+    def set_face(self, name: str) -> None:
+        self.face = name if name in smeter.FACES else "dark"
+        self.update()
+
+    def set_peak(self, on: bool) -> None:
+        self.peak_on = bool(on)
+        self.update()
+
+    @staticmethod
+    def _clamp(dbm: float) -> float:
+        return max(smeter.DIAL_LO_DBM, min(float(dbm), smeter.DIAL_HI_DBM))
+
+    # -- what is drawn, as numbers ------------------------------------
+    @property
+    def palette(self) -> dict:
+        return smeter.FACES[self.face]
+
+    def needle(self) -> tuple[float, float, float, float]:
+        """The needle as a line in the widget's own coordinates."""
+        return smeter.needle_geometry(self.width(), self.height(),
+                                      self.dial.angle(self.dbm))
+
+    def peak_needle(self) -> tuple[float, float, float, float] | None:
+        """The peak-hold marker, or None when the peak is switched off."""
+        if not self.peak_on:
+            return None
+        return smeter.needle_geometry(self.width(), self.height(),
+                                      self.dial.angle(self.peak_dbm), 0.94)
+
+    def level_dbm(self) -> float:
+        """The measured level in dBm -- the exact figure, not the needle's."""
+        return smeter.dbm_for_dbfs(self.level_dbfs, self.ref_dbfs)
+
+    def reading_text(self) -> str:
+        """What the face says, which is the level rather than the needle."""
+        if self.level_dbfs <= -190.0:
+            return "--"                  # nothing measured: no radio running
+        return smeter.reading(self.level_dbm())
+
+    # -- painting -----------------------------------------------------
+    def paintEvent(self, _ev):
+        p = QPainter(self)
+        try:
+            self._paint(p)
+        finally:
+            p.end()
+
+    def _paint(self, p: QPainter) -> None:
+        # Antialiasing on here, unlike the plots: this is a few hundred pixels
+        # of thin lines on a small widget, where a stair-stepped needle is the
+        # first thing anyone would notice, and the cost is a fraction of a
+        # millisecond.
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        col = self.palette
+        w, h = float(self.width()), float(self.height())
+        glass = QPainterPath()
+        glass.addRoundedRect(QRectF(1.0, 1.0, w - 2.0, h - 2.0), 6.0, 6.0)
+
+        sheen = QLinearGradient(0.0, 0.0, 0.0, h)
+        sheen.setColorAt(0.0, QColor(col["face2"]))
+        sheen.setColorAt(0.5, QColor(col["face"]))
+        sheen.setColorAt(1.0, QColor(col["face"]))
+        p.fillPath(glass, QBrush(sheen))
+        bezel = QPen(QColor(col["bezel"]))
+        bezel.setWidthF(1.4)
+        p.setPen(bezel)
+        p.drawPath(glass)
+
+        p.save()
+        p.setClipPath(glass)            # nothing is drawn outside the glass
+        self._paint_dial(p, w, h)
+        peak = self.peak_needle()
+        if peak is not None:
+            self._paint_needle(p, peak, col["peak"], 1.5)
+        self._paint_needle(p, self.needle(), col["needle"], 1.8,
+                           col["needle_edge"])
+        p.restore()
+
+        # The caption and the exact reading, along the foot of the face: the
+        # needle is the instrument, the text is the measurement.
+        p.setFont(mono_font(7))
+        band = QRectF(7.0, h - 15.0, w - 14.0, 11.0)
+        p.setPen(QPen(QColor(col["caption"])))
+        p.drawText(band, int(Qt.AlignmentFlag.AlignLeft
+                            | Qt.AlignmentFlag.AlignVCenter), "S-METER")
+        p.setPen(QPen(QColor(col["number"])))
+        p.drawText(band, int(Qt.AlignmentFlag.AlignRight
+                            | Qt.AlignmentFlag.AlignVCenter),
+                   self.reading_text())
+
+    def _paint_dial(self, p: QPainter, w: float, h: float) -> None:
+        """The arc: its ticks, and the numbers beside the long ones."""
+        col = self.palette
+        p.setFont(mono_font(7))
+        for i, (_dbm, label, major) in enumerate(self.dial.marks):
+            angle = self.dial.mark_angle(i)
+            inner = smeter.needle_geometry(w, h, angle, self._frac(6.0, h))
+            outer = smeter.needle_geometry(w, h, angle, 1.0)
+            pen = QPen(QColor(col["major"] if major else col["minor"]))
+            pen.setWidthF(1.4 if major else 0.8)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            p.setPen(pen)
+            p.drawLine(QPointF(outer[2], outer[3]), QPointF(inner[2], inner[3]))
+            if label:
+                spot = smeter.needle_geometry(w, h, angle, self._frac(18.0, h))
+                p.setPen(QPen(QColor(col["number"])))
+                p.drawText(QRectF(spot[2] - 13.0, spot[3] - 5.0, 26.0, 11.0),
+                           int(Qt.AlignmentFlag.AlignCenter), label)
+
+    @staticmethod
+    def _frac(short_by: float, h: float) -> float:
+        """Radius fraction that sits ``short_by`` pixels inside the arc."""
+        pivot_y = h * (1.0 + smeter.PIVOT_DROP)
+        full = pivot_y - 0.14 * h
+        return max(0.05, (full - short_by) / full)
+
+    @classmethod
+    def _paint_needle(cls, p: QPainter, line, colour: str, width: float,
+                      edge: str | None = None) -> None:
+        x1, y1, x2, y2 = line
+        if edge is not None:
+            outline = QPen(QColor(edge))
+            outline.setWidthF(width + 1.6)
+            outline.setCapStyle(Qt.PenCapStyle.RoundCap)
+            p.setPen(outline)
+            p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+        pen = QPen(QColor(colour))
+        pen.setWidthF(width)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+
+
+# Opening the radio, and not giving up when the device is not free yet.
+#
+# The SDRplay front end serves one client at a time, so while another program
+# holds it -- SDRuno, SoapySDRUtil, a second copy of this one -- open() fails at
+# once with "no available RSP devices found".  Nothing shows that beforehand:
+# enumerate() returns an empty list while the device is held, which is why the
+# window used to say "no SDR found" and then "error: no available RSP devices
+# found", and never looked again.  The device is not absent, it is busy, and it
+# is free the moment the other program closes -- so ask again, on a timer.  Not
+# in a blocking loop: this is the GUI thread, which has to stay able to paint
+# and be closed while it waits.
+OPEN_RETRY_FIRST = 1.0      # seconds before the first retry
+OPEN_RETRY_MAX = 5.0        # longest gap between attempts after that
+OPEN_RETRY_TOTAL = 300.0    # stop asking after this long without the device
+
+
+class DeviceOpener(QObject):
+    """Open the radio, waiting out a device another program is holding.
+
+    Kept out of the window so the policy -- what is worth waiting for, how
+    often to ask, when to give up -- can be driven one step at a time by a test
+    rather than by sleeping on a real timer with a real radio attached.
+    """
+
+    opened = pyqtSignal()               # the radio is streaming
+    waiting = pyqtSignal(str, float)    # (why it failed, seconds until the retry)
+    gave_up = pyqtSignal(str)           # not retryable, or out of time
+
+    def __init__(self, radio: Radio, parent: QObject | None = None):
+        super().__init__(parent)
+        self.radio = radio
+        self.attempts = 0
+        self._deadline = 0.0
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self._attempt)
+
+    @property
+    def waiting_for_device(self) -> bool:
+        """Is another attempt already scheduled?"""
+        return self._timer.isActive()
+
+    def start(self) -> bool:
+        """Attempt now, and arrange to try again if the device is busy.
+
+        A deliberate start (the Start button, or a setting that restarts the
+        stream) gets a fresh budget: the user asking again should not be
+        answered with a deadline that has already expired.
+        """
+        if self.radio.opened:
+            return True
+        self.cancel()
+        self.attempts = 0
+        return self._try_now()
+
+    def cancel(self):
+        """Forget the retry -- the window is closing, or the user stopped."""
+        self._timer.stop()
+
+    def _try_now(self) -> bool:
+        # open() is atomic -- a failure part-way through leaves no device
+        # claimed -- so there is nothing to undo here beyond the state of the
+        # radio itself, which close() resets to "stopped".
+        try:
+            self.radio.open()
+        except Exception as exc:
+            self.radio.close()
+            if self.attempts == 0:
+                self.attempts = 1
+                self._deadline = time.monotonic() + OPEN_RETRY_TOTAL
+            else:
+                self.attempts += 1
+            left = self._deadline - time.monotonic()
+            if not transient_open_error(exc) or left <= 0:
+                self.cancel()
+                self.gave_up.emit(str(exc))
+                return False
+            self._wait(OPEN_RETRY_FIRST if self.attempts == 1
+                       else min(OPEN_RETRY_MAX, left), str(exc))
+            return False
+        self.cancel()
+        self.attempts = 0
+        self.opened.emit()
+        return True
+
+    def _wait(self, delay: float, why: str):
+        self._timer.start(int(max(delay, 0.1) * 1000))
+        self.waiting.emit(why, delay)
+
+    def _attempt(self):
+        self._try_now()
 
 
 class MainWindow(QMainWindow):
     def __init__(self, settings: Settings | None = None,
-                 memory_path: str | None = None):
+                 memory_path: str | None = None,
+                 prefs_store: prefs.PrefsStore | None = None):
+        """``prefs_store`` is where the settings are remembered between runs.
+
+        Passed in rather than opened here, and optional: with no store the
+        window is a plain window that forgets everything, which is what a test
+        and a ``--screenshot`` run both want -- neither should be able to write
+        over the settings of the person using the program.
+        """
         super().__init__()
         self.setWindowTitle(f"{logo.APP_NAME} -- {logo.APP_TAGLINE}")
         # The task-bar entry, set here as well as in __main__ so that a window
@@ -870,10 +1300,23 @@ class MainWindow(QMainWindow):
         self.settings = settings or Settings()
         self.memory = MemoryStore(memory_path)
         self.bridge = Bridge()
+        # FT8 listens to the demodulated audio rather than to the sound card,
+        # so what it decodes is what the receiver is tuned to even with the
+        # volume down or muted.  Its callbacks arrive on the DSP and decode
+        # threads and go through the bridge like every other thread's do.
+        self.spotter = ft8.FT8Spotter(
+            dial_hz=self.settings.tuned_freq,
+            on_decodes=lambda d, when: self.bridge.ft8_decodes.emit(d, when),
+            on_status=lambda s: self.bridge.ft8_status.emit(s),
+            on_error=lambda s: self.bridge.ft8_error.emit(s))
         self.radio = Radio(self.settings,
                            on_spectrum=lambda c, db, sr: self.bridge.spectrum.emit(c, db, sr),
                            on_status=lambda st: self.bridge.status.emit(st),
-                           on_error=lambda m: self.bridge.error.emit(m))
+                           on_error=lambda m: self.bridge.error.emit(m),
+                           on_lost=lambda why: self.bridge.lost.emit(why),
+                           on_audio=lambda a: self.spotter.feed(a))
+        self.opener = DeviceOpener(self.radio, self)
+        self._closing = False
         self._latest: tuple | None = None
         self._step = 1000
         self._zoom = 1
@@ -881,15 +1324,52 @@ class MainWindow(QMainWindow):
         self._ui_running = False       # mirrors what the Start button shows
         self.frames_drawn = 0
         self.render_seconds = 0.0
+        self._ft8_clock = ""            # the slot countdown's text
+        self._ft8_status_text = ""      # the last thing the spotter reported
+        self._ft8_once = False          # "decode this slot, then stop"
+        self._ft8_borrowed: dict[str, tuple] = {}   # settings FT8 is using
+        self._meter_t: float | None = None          # when the meter was last fed
+        self._meter_text = ""                       # what its readout says
+        self.prefs = prefs_store
+        self.wants_maximised = False    # set by _restore_window_state
+        self._shown = False             # has showEvent run?
 
         self._build_ui()
         self._connect()
+        # The stored window state, applied while _building is still set: the
+        # handlers run (so the widgets and the picture agree with the file), but
+        # nothing is written back out of a half-built window.
+        self._apply_saved_ui()
         self._building = False
 
         self._timer = QTimer(self)
         self._timer.setInterval(REPAINT_MS)
         self._timer.timeout.connect(self._render)
         self._timer.start()
+
+        # The slot clock is the one thing here that is timed rather than
+        # reported: it counts down to a boundary that the audio itself will
+        # then land on (see FT8Spotter.feed), so it only runs while the FT8
+        # panel is on screen.
+        self._ft8_timer = QTimer(self)
+        self._ft8_timer.setInterval(FT8_READOUT_MS)
+        self._ft8_timer.timeout.connect(self._ft8_tick)
+
+        self._prefs_timer = QTimer(self)
+        self._prefs_timer.setSingleShot(True)
+        self._prefs_timer.setInterval(PREFS_SAVE_MS)
+        self._prefs_timer.timeout.connect(self._remember)
+        self._restore_window_state()
+        # After the geometry: the divider is a share of whatever height the
+        # window ended up with, so it is the last word on the layout.
+        self._restore_split()
+
+        if self._current_mode() == "ft8":
+            # Started as "--mode ft8": the buttons and the filter are already
+            # where the command line put them, but the strip still has to be
+            # brought up and the decoder armed -- and only here, after every
+            # widget and timer it touches exists.
+            self._ft8_mode(True)
 
         self._refresh_devices()
         self.lbl_device.setText(self._device_label())
@@ -909,14 +1389,21 @@ class MainWindow(QMainWindow):
 
         self.spectrum = SpectrumPlot()
         self.waterfall = WaterfallPlot()
-        split = QSplitter(Qt.Orientation.Vertical)
-        split.addWidget(self.spectrum)
-        split.addWidget(self.waterfall)
-        split.setSizes([300, 340])
-        root.addWidget(split, 1)
+        self.split = QSplitter(Qt.Orientation.Vertical)
+        self.split.addWidget(self.spectrum)
+        self.split.addWidget(self.waterfall)
+        self.split.setSizes([300, 340])     # the divider is remembered too
+        root.addWidget(self.split, 1)
 
         root.addWidget(self._build_rf_row())
         root.addWidget(self._build_waterfall_row())
+
+        # Last, under the controls, and hidden until FT8 is selected: a decode
+        # list belongs at the foot of the window, where it reads as a log and
+        # where making it appear does not move the controls the pointer is
+        # already aiming at.
+        self.ft8_panel = self._build_ft8_panel()
+        root.addWidget(self.ft8_panel)
         self.setCentralWidget(central)
 
         self.status = self.statusBar()
@@ -1109,6 +1596,12 @@ class MainWindow(QMainWindow):
             b.setFixedWidth(52)
             self.mode_buttons[key] = b
         lay.addWidget(self._pair("Mode", *self.mode_buttons.values()))
+        # Tick the mode the window was started in.  Not _select_mode: the
+        # receiver is already running the settings it was built with (possibly
+        # "--bw" off the command line), and all that was ever wrong here was
+        # that the button for the mode actually in use was not lit.
+        if self.settings.mode in self.mode_buttons:
+            self.mode_buttons[self.settings.mode].setChecked(True)
 
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.VLine)
@@ -1168,7 +1661,11 @@ class MainWindow(QMainWindow):
         self.spn_sq = QDoubleSpinBox()
         self.spn_sq.setRange(-140.0, 0.0)
         self.spn_sq.setSuffix(" dB")
-        self.spn_sq.setValue(-140.0)
+        # The remembered squelch, floored at what the control offers: anything
+        # at or below -140 is "off", and -140 is as low as this spinner goes
+        # (the settings themselves use -200 for off, as the decoder does), so
+        # what is shown is the value in force rather than a floor of the range.
+        self.spn_sq.setValue(max(-140.0, float(self.settings.squelch_db)))
         self.spn_sq.setToolTip("Mute audio below this signal level (-140 = off)")
         lay.addWidget(self._pair("Squelch", self.spn_sq))
 
@@ -1218,12 +1715,19 @@ class MainWindow(QMainWindow):
         self.cmb_rf = QComboBox()
         for i in range(4):
             self.cmb_rf.addItem(str(i), i)
+        # Showing the setting rather than the first entry of the list: these
+        # two are remembered like everything else, and a control that disagrees
+        # with the value in use is worse than no control at all.
+        self.cmb_rf.setCurrentIndex(max(0, self.cmb_rf.findData(
+            int(self.settings.rf_gain))))
         lay.addWidget(self._pair("RF gain", self.cmb_rf))
 
         self.cmb_tbw = QComboBox()
         self.cmb_tbw.addItem("Auto", 0)
         for bw in TUNER_BANDWIDTHS:
             self.cmb_tbw.addItem(f"{bw/1e6:g} MHz", bw)
+        self.cmb_tbw.setCurrentIndex(max(0, self.cmb_tbw.findData(
+            int(self.settings.tuner_bw))))
         lay.addWidget(self._pair("Tuner BW", self.cmb_tbw))
 
         sep = QFrame()
@@ -1241,12 +1745,65 @@ class MainWindow(QMainWindow):
         self.cmb_fft = QComboBox()
         for n in (1024, 2048, 4096, 8192, 16384, 32768, 65536):
             self.cmb_fft.addItem(str(n), n)
-        self.cmb_fft.setCurrentText("4096")
+        # Whatever the settings say, which is the remembered size -- or one from
+        # a settings file this list does not name, in which case it is added so
+        # that what the window shows is what is really in use (the same
+        # treatment the sample-rate list gets, and for the same reason).
+        idx = self.cmb_fft.findData(int(self.settings.n_fft))
+        if idx < 0:
+            self.cmb_fft.addItem(str(int(self.settings.n_fft)),
+                                 int(self.settings.n_fft))
+            idx = self.cmb_fft.count() - 1
+        self.cmb_fft.setCurrentIndex(idx)
         self.cmb_fft.setToolTip(
             "Frequency resolution of the spectrum and the waterfall: one bin "
             "is the span divided by this.  4096 suits a 2 MSps span; larger "
             "sizes pay for themselves on a zoomed view")
         lay.addWidget(self._pair("FFT", self.cmb_fft))
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.VLine)
+        lay.addWidget(sep)
+
+        # The signal meter, with the gain controls it is watching: it reads the
+        # passband level, so it is the thing that shows what IF gain and RF gain
+        # are doing to the signal.  Sectional drawing is in rspsdr/smeter.py.
+        self.smeter = SMeter()
+        self.lbl_smeter = QLabel("")            # the same reading as text
+        self.lbl_smeter.setFont(mono_font(9))
+        self.lbl_smeter.setStyleSheet("color:#cfd9e4")
+        self.lbl_smeter.setMinimumWidth(132)
+        lay.addWidget(self._pair(self.smeter, self.lbl_smeter))
+
+        self.spn_sref = QDoubleSpinBox()
+        self.spn_sref.setDecimals(1)
+        self.spn_sref.setRange(-140.0, 0.0)
+        self.spn_sref.setSingleStep(0.5)
+        self.spn_sref.setSuffix(" dBFS")
+        self.spn_sref.setValue(smeter.DEFAULT_REF_DBFS)
+        self.spn_sref.setToolTip(
+            "The level that reads S9.  The RSP1 reports the level in dBFS and "
+            "has no absolute calibration of its own, so this one number is what "
+            "puts the scale in the right place: set it until the meter agrees "
+            "with a station, or a signal generator, of known strength.\n"
+            "Set it at the IF and RF gain you actually use, because the level "
+            "it is measured from is taken after those stages.")
+        lay.addWidget(self._pair("S9 at", self.spn_sref))
+
+        self.chk_speak = QCheckBox("Peak")
+        self.chk_speak.setChecked(True)
+        self.chk_speak.setToolTip(
+            "A second needle that holds the highest level of the last half "
+            "second, so a brief signal is not missed between repaints")
+        lay.addWidget(self.chk_speak)
+
+        self.cmb_sface = QComboBox()
+        for name in smeter.FACE_NAMES:
+            self.cmb_sface.addItem(name.capitalize(), name)
+        self.cmb_sface.setToolTip(
+            "Meter scale colouring: the dark face of the later radios, or the "
+            "cream dial of the older analogue ones")
+        lay.addWidget(self._pair("Face", self.cmb_sface))
 
         return w
 
@@ -1353,6 +1910,81 @@ class MainWindow(QMainWindow):
 
         return w
 
+    def _build_ft8_panel(self) -> QWidget:
+        """The FT8 strip: band presets, the slot clock, and the decode list."""
+        w = QFrame()
+        w.setObjectName("ft8panel")
+        w.setStyleSheet(
+            "#ft8panel{background:#0c1721;border:1px solid #1d3446;"
+            "border-radius:4px}")
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(7, 5, 7, 5)
+        lay.setSpacing(4)
+
+        top, row = self._row()
+
+        self.cmb_ft8band = QComboBox()
+        for b in ft8.FT8_BANDS:
+            label = f"{b.name}  {b.dial/1e6:.3f} MHz"
+            self.cmb_ft8band.addItem(
+                label + (f"  ({b.note})" if b.note else ""), b.name)
+        self.cmb_ft8band.setMinimumWidth(210)
+        self.cmb_ft8band.setToolTip(
+            "The standard FT8 dial frequency for a band (WSJT-X's convention): "
+            "the receiver is tuned there and the signals sit above it in the "
+            "audio passband, so a signal on 1000 Hz is 14.075 MHz")
+        row.addWidget(self._pair("FT8 band", self.cmb_ft8band))
+
+        self.chk_ft8every = QCheckBox("Every slot")
+        self.chk_ft8every.setChecked(True)
+        self.chk_ft8every.setToolTip(
+            "Decode each 15-second slot as it passes, or untick to decode the "
+            "next one and stop")
+        row.addWidget(self.chk_ft8every)
+
+        self.btn_ft8clear = QPushButton("Clear")
+        self.btn_ft8clear.setToolTip("Forget the decoded messages listed below")
+        row.addWidget(self.btn_ft8clear)
+
+        self.lbl_ft8 = QLabel("")
+        self.lbl_ft8.setFont(mono_font(10))
+        self.lbl_ft8.setStyleSheet("color:#8fd8f0")
+        self.lbl_ft8.setToolTip("Slot clock, decoder state, and totals")
+        row.addWidget(self.lbl_ft8)
+        lay.addWidget(top)
+
+        self.tbl_ft8 = QTableWidget(0, len(FT8_COLS))
+        self.tbl_ft8.setHorizontalHeaderLabels([name for name, _ in FT8_COLS])
+        self.tbl_ft8.verticalHeader().setVisible(False)
+        self.tbl_ft8.setShowGrid(False)
+        self.tbl_ft8.setFont(mono_font(10))
+        self.tbl_ft8.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.tbl_ft8.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows)
+        self.tbl_ft8.setSelectionMode(
+            QTableWidget.SelectionMode.SingleSelection)
+        # No focus, so the arrow keys and the wheel still belong to the
+        # frequency box and the plots rather than scrolling this list.
+        self.tbl_ft8.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        header = self.tbl_ft8.horizontalHeader()
+        for i, (_, px) in enumerate(FT8_COLS):
+            if px:
+                header.setSectionResizeMode(i, QHeaderView.ResizeMode.Fixed)
+                self.tbl_ft8.setColumnWidth(i, px)
+            else:
+                header.setSectionResizeMode(i, QHeaderView.ResizeMode.Stretch)
+        # As tall as six decodes, and able to shrink to three: the strip is
+        # worth less than the waterfall when the window is at its smallest.
+        self.tbl_ft8.setMinimumHeight(24 + FT8_MIN_ROWS * FT8_ROW_PX)
+        self.tbl_ft8.setMaximumHeight(24 + FT8_ROWS * FT8_ROW_PX)
+        self.tbl_ft8.setToolTip(
+            "One line per decoded message.  Click a line to tune to the signal "
+            "that sent it")
+        lay.addWidget(self.tbl_ft8)
+
+        w.setVisible(False)
+        return w
+
     # ------------------------------------------------------- wiring
     def _connect(self):
         self.btn_start.clicked.connect(self._toggle)
@@ -1396,8 +2028,27 @@ class MainWindow(QMainWindow):
         self.cmb_fft.currentIndexChanged.connect(
             lambda i: self._apply(n_fft=int(self.cmb_fft.itemData(i))))
 
+        self.spn_sref.valueChanged.connect(self._smeter_ref_changed)
+        self.chk_speak.toggled.connect(self._smeter_peak_changed)
+        self.cmb_sface.currentIndexChanged.connect(self._smeter_face_changed)
+
+        self.cmb_ft8band.currentIndexChanged.connect(self._ft8_band_selected)
+        self.chk_ft8every.toggled.connect(self._ft8_every_changed)
+        self.btn_ft8clear.clicked.connect(self._ft8_clear)
+        self.tbl_ft8.cellClicked.connect(self._ft8_tune_to_row)
+        self.bridge.ft8_decodes.connect(self._ft8_add_decodes)
+        self.bridge.ft8_status.connect(self._ft8_spotter_says)
+        self.bridge.ft8_error.connect(self._ft8_error)
+
+        self.opener.opened.connect(self._device_opened)
+        self.opener.waiting.connect(self._device_waiting)
+        self.opener.gave_up.connect(self._device_gave_up)
+        self.bridge.lost.connect(self._device_lost)
+
         self.spectrum.tuned.connect(self._tune)
         self.waterfall.tuned.connect(self._tune)
+        self.spectrum.settled.connect(self._tune_settled)
+        self.waterfall.settled.connect(self._tune_settled)
         self.waterfall.zoom.connect(self._zoom_step)
         self.spectrum.recentre.connect(self._recentre_to)
         self.spectrum.stepped.connect(self._step_tune)
@@ -1423,6 +2074,207 @@ class MainWindow(QMainWindow):
         self.bridge.status.connect(self._on_status)
         self.bridge.error.connect(self._on_error)
 
+    # ------------------------------------------------- remembering
+    # What the window was set to last time, so that nothing has to be set up
+    # twice.  The receiver settings come from the settings file through
+    # prefs.settings_from (the CLI and the file both feed the Settings the
+    # window is built with); what is left here is the window's own state -- how
+    # far it is zoomed, what the picture looks like, which FT8 band -- and the
+    # geometry of the window itself.
+
+    def _select_data(self, combo, value, default_index: int = 0) -> None:
+        """Select the entry holding ``value``, or fall back to the default.
+
+        Anything the list does not offer is ignored rather than added: a
+        remembered value out of range is not a value the user can have chosen
+        here (the receiver's rate list does add one, because a rate can come
+        from the command line; a zoom of 5x cannot come from anywhere).
+        """
+        idx = combo.findData(value)
+        combo.setCurrentIndex(idx if idx >= 0 else default_index)
+
+    def _apply_saved_ui(self):
+        """Bring the window's own controls into line with the stored state."""
+        p = self.prefs
+        if p is None:
+            return
+        self._select_data(self.cmb_step, p.value("ui", "step", "int",
+                                                 (1, 1_000_000), self._step))
+        self._select_data(self.cmb_zoom, p.value("ui", "zoom", "int",
+                                                 (1, 64), self._zoom))
+        self.chk_wfauto.setChecked(p.value("ui", "wf_auto", "flag", (), True))
+        self.spn_wflo.setValue(p.value("ui", "wf_floor", "number",
+                                       (-160.0, 20.0), self.spn_wflo.value()))
+        self.spn_wfhi.setValue(p.value("ui", "wf_ceiling", "number",
+                                       (-160.0, 40.0), self.spn_wfhi.value()))
+        self.spn_contrast.setValue(p.value("ui", "wf_contrast", "number",
+                                           (6.0, 90.0),
+                                           self.spn_contrast.value()))
+        self._select_data(self.cmb_cmap,
+                          p.value("ui", "wf_cmap", "text", (24,), None))
+        self.chk_cmrev.setChecked(p.value("ui", "wf_reverse", "flag", (), False))
+        detail = p.value("ui", "wf_detail", "int", (0, 100_000), None)
+        if detail is not None:
+            self._select_data(self.cmb_wfdetail, detail)
+        # Quietly: the band's dial was remembered as well, and the frequency is
+        # the better record of where the user actually was -- a band name is a
+        # label for a preset, and re-selecting it out loud would tune the box to
+        # the preset's dial over the frequency they left the receiver on.
+        self.spn_sref.setValue(p.value("ui", "s_meter_ref", "number",
+                                       (-140.0, 0.0), smeter.DEFAULT_REF_DBFS))
+        self.chk_speak.setChecked(p.value("ui", "s_meter_peak", "flag", (), True))
+        self._select_data(self.cmb_sface,
+                          p.value("ui", "s_meter_face", "choice",
+                                  smeter.FACE_NAMES, None))
+
+        band = p.value("ui", "ft8_band", "text", (12,), None)
+        if band is not None:
+            idx = self.cmb_ft8band.findData(band)
+            if idx >= 0:
+                self.cmb_ft8band.blockSignals(True)
+                self.cmb_ft8band.setCurrentIndex(idx)
+                self.cmb_ft8band.blockSignals(False)
+        self.chk_ft8every.setChecked(p.value("ui", "ft8_every", "flag", (), True))
+        # The levels have just been set by hand; with auto on, the picture now
+        # tracks the noise floor and takes the spinners over (see
+        # _sync_wf_levels), which is the state the user left it in.
+        self._wf_settings_changed()
+
+    def _restore_window_state(self):
+        """Put the window back where and how big it was, if that still exists.
+
+        The place and the size are decided separately.  A remembered *place* is
+        only used when it lands on a screen that is connected *now*: monitors
+        are unplugged and resolutions change, and a window restored off the edge
+        of the world is worse than one that opens in the middle of the display.
+        The size is the window's own and does not depend on the monitor, so it
+        comes back either way -- never larger than the screen it has to fit on,
+        or a rectangle remembered from a bigger display would open with its
+        controls off the edges.
+        """
+        p = self.prefs
+        if p is None:
+            return
+        self.wants_maximised = p.value("window", "maximised", "flag", (), False)
+        w = p.value("window", "w", "int", (400, 20_000), None)
+        h = p.value("window", "h", "int", (300, 20_000), None)
+        x = p.value("window", "x", "int", (-20_000, 20_000), None)
+        y = p.value("window", "y", "int", (-20_000, 20_000), None)
+        if w is not None and h is not None:
+            area = max((s.availableGeometry() for s in QApplication.screens()),
+                       key=lambda r: r.width() * r.height(), default=None)
+            if area is not None:
+                w, h = min(w, area.width()), min(h, area.height())
+            self.resize(max(int(w), self.minimumWidth()),
+                        max(int(h), self.minimumHeight()))
+        if None in (x, y, w, h):
+            return
+        # x, y are the frame's corner and w, h the client size, which is how
+        # they were written down (see _remember).
+        want = QRect(x, y, w, h)
+        for screen in QApplication.screens():
+            seen = screen.availableGeometry().intersected(want)
+            if seen.width() >= 120 and seen.height() >= 60:
+                self.move(x, y)
+                return
+        # Nowhere on screen: keep the centred default from _size_to_screen.
+
+    def showEvent(self, ev):
+        """Come back maximised, if that is how the window was left.
+
+        Here rather than in __init__ because whether a window is maximised is
+        the window manager's business and only means anything once the window
+        is on screen -- and here rather than in the caller because every caller
+        (the program, a test, the screenshot run) then gets the same window.
+        """
+        super().showEvent(ev)
+        if self._shown or not self.wants_maximised:
+            return
+        self._shown = True              # before the call: it shows us again
+        self.showMaximized()
+
+    def _restore_split(self):
+        """Put the divider between the spectrum and the waterfall back."""
+        if self.prefs is None:
+            return
+        sizes = [self.prefs.value("ui", "split_spectrum", "int", (20, 20_000),
+                                  None),
+                 self.prefs.value("ui", "split_waterfall", "int", (20, 20_000),
+                                  None)]
+        if None not in sizes:
+            self.split.setSizes(sizes)
+
+    def _remember_soon(self):
+        """Remember the current state, a moment after it stops changing."""
+        if self.prefs is None or self._building:
+            return
+        self._prefs_timer.start()
+
+    def _remember(self):
+        """Write everything worth remembering.  Called on change, and on close."""
+        p = self.prefs
+        if p is None:
+            return
+        prefs.remember_settings(p, self._settings_as_meant())
+        p.put("ui", "step", int(self._step))
+        p.put("ui", "zoom", int(self._zoom))
+        p.put("ui", "wf_auto", bool(self.chk_wfauto.isChecked()))
+        p.put("ui", "wf_floor", float(self.spn_wflo.value()))
+        p.put("ui", "wf_ceiling", float(self.spn_wfhi.value()))
+        p.put("ui", "wf_contrast", float(self.spn_contrast.value()))
+        p.put("ui", "wf_cmap", str(self.cmb_cmap.currentData()))
+        p.put("ui", "wf_reverse", bool(self.chk_cmrev.isChecked()))
+        p.put("ui", "wf_detail", int(self.cmb_wfdetail.currentData()))
+        p.put("ui", "ft8_band", str(self.cmb_ft8band.currentData() or ""))
+        p.put("ui", "s_meter_ref", float(self.spn_sref.value()))
+        p.put("ui", "s_meter_peak", bool(self.chk_speak.isChecked()))
+        p.put("ui", "s_meter_face", str(self.cmb_sface.currentData()))
+        p.put("ui", "ft8_every", bool(self.chk_ft8every.isChecked()))
+        sizes = self.split.sizes()
+        if len(sizes) == 2:
+            p.put("ui", "split_spectrum", int(sizes[0]))
+            p.put("ui", "split_waterfall", int(sizes[1]))
+        # The *normal* geometry, not the maximised one: the size to come back to
+        # is the one the user chose, and maximised is remembered separately.
+        # And the position is the *frame's*, the size the client's, because that
+        # is what the two calls on the way back in take: move() places a
+        # top-level window's frame, resize() sets the client area.  Saving the
+        # client position instead -- which is geometry() and sits a title bar
+        # below the frame -- walked the window down the screen by the height of
+        # its own decoration on every restart.
+        frame, rect = self.frameGeometry(), self.geometry()
+        dx, dy = frame.x() - rect.x(), frame.y() - rect.y()
+        if self.isMaximized() or self.isFullScreen():
+            rect = self.normalGeometry()
+        for key, value in (("x", rect.x() + dx), ("y", rect.y() + dy),
+                           ("w", rect.width()), ("h", rect.height())):
+            p.put("window", key, int(value))
+        p.put("window", "maximised", bool(self.isMaximized()))
+        try:
+            p.save()
+        except OSError as exc:
+            # Worth saying, never worth interrupting for: the settings file is a
+            # convenience, and the tuning in front of the user is not.
+            self._on_error(f"could not write {p.path}: {exc}")
+
+    def _settings_as_meant(self) -> Settings:
+        """The receiver settings as the *user* left them, not as FT8 borrows them.
+
+        FT8 switches noise reduction, audio AGC and the squelch off while it
+        listens (see :meth:`_ft8_prepare`), and those are three of the settings
+        that get written down.  Writing the borrowed values would mean closing
+        the window while in FT8 quietly cost the user their listening settings
+        for every other mode -- so a borrowed value that is still exactly what
+        FT8 forced is written down as the value it was borrowed from.  One the
+        user has changed since is theirs, and is written as it stands.
+        """
+        settings = self.settings
+        for name, (before, forced) in self._ft8_borrowed.items():
+            if float(getattr(settings, name)) != float(forced):
+                continue
+            settings = settings.copy_with(**{name: before})
+        return settings
+
     # ------------------------------------------------------ actions
     def _device_label(self) -> str:
         devs = list_devices()
@@ -1445,31 +2297,74 @@ class MainWindow(QMainWindow):
 
     def _toggle(self):
         if self.radio.opened:
+            self.opener.cancel()
             self.radio.close()
             self._set_running_ui(False)
         else:
             self.start_radio()
 
     def start_radio(self) -> bool:
-        """Open the stream if it is not already running."""
+        """Open the stream if it is not already running.
+
+        A device that is merely busy is waited for rather than reported: the
+        opener keeps asking, so the window starts by itself as soon as whatever
+        was holding the radio lets go (see DeviceOpener).
+        """
         if self.radio.opened:
             return True
-        try:
-            self.radio.open()
-            self._set_running_ui(True)
-            return True
-        except Exception as exc:
-            self.radio.close()
-            self._set_running_ui(False)
-            self._on_error(str(exc))
-            return False
+        ok = self.opener.start()
+        self._set_running_ui(self.radio.opened)
+        return ok
+
+    def _device_opened(self):
+        """The opener got the device -- after a retry, or on the first try."""
+        self._refresh_devices()
+        self.lbl_device.setText(self._device_label())
+        self._set_running_ui(True)
+        # Only shown until the first status readout, which takes this line over
+        # within a frame.  It has to be written, though: otherwise a start that
+        # succeeded on the fourth retry still had "trying again in 5 s" on the
+        # status bar, and the bar was the one place that said it had not worked.
+        self._on_status_line("streaming")
+
+    def _device_waiting(self, why: str, delay: float):
+        self.lbl_device.setText("SDRplay not available -- waiting")
+        self._on_status_line(
+            f"the SDRplay device is busy or unplugged ({why}) -- trying again in "
+            f"{delay:.0f} s")
+
+    def _device_gave_up(self, why: str):
+        self._on_error(why)
+        self._on_status_line(
+            f"could not open the RSP1: {why} -- press Start to try again")
+
+    def _device_lost(self, why: str):
+        """The stream stopped mid-session: unplugged, or the driver died.
+
+        Radio._lost has already stopped both of its threads and left the device
+        for this thread to release.  The receiver is closed and then looked for
+        again with the same retry used at startup, so an RSP1 that was unplugged
+        -- or whose service restarted -- comes back on its own when it is
+        available again, instead of leaving a frozen waterfall and a Stop button
+        that stops nothing.
+        """
+        if self._closing or not self.radio.opened:
+            return
+        self.opener.cancel()
+        self.radio.close()
+        self._set_running_ui(False)
+        self.lbl_device.setText("SDRplay gone -- looking for it again")
+        self._on_status_line(
+            f"the RSP1 stopped streaming ({why}) -- closing it and looking again")
+        self.opener.start()
 
     def autostart(self):
         """Open the radio as soon as the window is up."""
-        if not self.start_radio():
-            self._on_status_line(
-                "could not open the RSP1 -- check it is plugged in and the "
-                "sdrplay service is running, then press Start")
+        if self.start_radio() or self.opener.waiting_for_device:
+            return
+        self._on_status_line(
+            "could not open the RSP1 -- check it is plugged in and the "
+            "sdrplay service is running, then press Start")
 
     def _set_running_ui(self, running: bool):
         self._ui_running = bool(running)
@@ -1486,7 +2381,18 @@ class MainWindow(QMainWindow):
         if self._building:
             return
         self.settings = self.settings.copy_with(**kw)
-        self.radio.apply(**kw)
+        try:
+            self.radio.apply(**kw)
+        except Exception as exc:
+            # Changing the rate or the device arguments restarts the stream, and
+            # that can fail if another program took the device meanwhile.  Same
+            # recovery as startup, instead of a traceback out of a Qt slot.
+            self._set_running_ui(False)
+            self._on_error(str(exc))
+            self.opener.start()
+        # Every receiver setting the user can change comes through here, so this
+        # is the one place that has to remember them as they change.
+        self._remember_soon()
 
     def _rate_changed(self):
         rate = int(self.cmb_rate.currentData())
@@ -1516,12 +2422,34 @@ class MainWindow(QMainWindow):
     def _step_changed(self):
         self._step = int(self.cmb_step.currentData())
         self.spn_freq.setSingleStep(self._step / 1e6)
+        self._remember_soon()
 
     def _tune(self, freq: float):
+        """Follow the pointer: a click or drag on one of the plots."""
         self.spn_freq.setValue(freq / 1e6)
         self._maybe_recentre(freq)
 
+    def _tune_settled(self, freq: float):
+        """The gesture is over -- only now may the window follow the dial.
+
+        The plot clears its own dragging flag before emitting this, so the
+        recentre that _tune deliberately skipped while the pointer was down
+        happens once, at the end, instead of fighting the drag.
+        """
+        self.spn_freq.setValue(freq / 1e6)
+        self._maybe_recentre(freq)
+
+    def _pointer_down(self) -> bool:
+        """Is a click or drag in progress on either plot?"""
+        return bool(self.spectrum._dragging or self.waterfall._dragging)
+
     def _maybe_recentre(self, freq: float):
+        # Never mid-gesture: the picture moves when the receiver recentres, so
+        # the frequency under the pointer would change while the user is still
+        # holding it.  A drag across the recentre threshold used to tune in
+        # steps of half a window; now the window moves once, on release.
+        if self._pointer_down():
+            return
         # The zoom can make the visible window far narrower than the receiver
         # span, so the limit follows the window, not the span.
         #
@@ -1573,7 +2501,13 @@ class MainWindow(QMainWindow):
         for k, btn in self.mode_buttons.items():
             btn.setChecked(k == key)
         self._select_bw(MODE_BW.get(key, 2400.0))
-        self._apply(mode=key, filter_bw=float(self.cmb_bw.currentData()))
+        # The demodulator is never told "ft8" -- it is USB that is heard, with
+        # the decode behind it -- but the *window* remembers the mode as FT8,
+        # so that a memory channel saved in this mode comes back in it.
+        self._apply(mode=ft8.receiver_mode(key),
+                    filter_bw=float(self.cmb_bw.currentData()))
+        self.settings = self.settings.copy_with(mode=key)
+        self._ft8_mode(key == "ft8")
 
     def _mode_selected(self, key: str):
         self._select_mode(key)
@@ -1606,9 +2540,55 @@ class MainWindow(QMainWindow):
         self.lbl_if.setText(f"{v} dB")
         self._apply(if_gain=float(v))
 
+    # -- the signal meter --------------------------------------------
+    def _update_meter(self):
+        """Give the meter the level the receiver is measuring.
+
+        Read straight from the demodulator rather than from the status signal: a
+        needle needs about twenty samples a second, and the status bar's own
+        readout is published every 0.4 s.  The value is one float written by
+        the DSP thread once per hop and simply read here, which needs no lock --
+        and the passband level, not the audio, so the needle does not follow the
+        volume control and does not need the sound card to be working.
+        """
+        demod = getattr(self.radio, "demod", None)
+        now = time.perf_counter()
+        dt = 0.0 if self._meter_t is None else min(now - self._meter_t, 0.5)
+        self._meter_t = now
+        # A stopped receiver feeds the needle *nothing* rather than the last
+        # level it measured.  The demodulator survives being closed, so its
+        # passband level stands at whatever was being heard when the stream
+        # stopped -- and a needle frozen at the last signal is worse than no
+        # reading at all: it looks like the receiver is still listening.  Fed
+        # silence instead, the needle falls away and settles at its rest, which
+        # is what the meter of a set that has been switched off does.
+        dbfs = (demod.passband_db
+                if demod is not None and self.radio.opened else -200.0)
+        self.smeter.feed(dbfs, dt)
+        reading = self.smeter.reading_text()
+        if reading != self._meter_text:
+            self._meter_text = reading
+            level = self.smeter.level_dbm()
+            self.lbl_smeter.setText(
+                f"{reading}   {level:.0f} dBm\n{self.smeter.level_dbfs:.1f} dBFS"
+                if reading != "--" else "--   no signal reading\n(radio stopped)")
+
+    def _smeter_ref_changed(self, v: float):
+        self.smeter.set_ref(float(v))
+        self._remember_soon()
+
+    def _smeter_peak_changed(self, on: bool):
+        self.smeter.set_peak(bool(on))
+        self._remember_soon()
+
+    def _smeter_face_changed(self, *_):
+        self.smeter.set_face(str(self.cmb_sface.currentData()))
+        self._remember_soon()
+
     def _wf_settings_changed(self, *_):
         auto = self.chk_wfauto.isChecked()
         self.spn_contrast.setEnabled(auto)
+        self._remember_soon()
         self.spn_wflo.setEnabled(not auto)
         self.spn_wfhi.setEnabled(not auto)
         self.waterfall.set_levels(auto, float(self.spn_contrast.value()),
@@ -1618,10 +2598,12 @@ class MainWindow(QMainWindow):
     def _wf_colour_changed(self, *_):
         key = self.cmb_cmap.currentData()
         self.waterfall.set_colormap(str(key), self.chk_cmrev.isChecked())
+        self._remember_soon()
 
     def _wf_detail_changed(self, *_):
         self.waterfall.set_detail(int(self.cmb_wfdetail.currentData()))
         self._wf_detail_readout()
+        self._remember_soon()
 
     def _wf_detail_readout(self):
         """Say what the picture's resolution actually is, in Hz per column.
@@ -1669,6 +2651,7 @@ class MainWindow(QMainWindow):
         self._maybe_recentre(self.settings.tuned_freq)
         self._on_status_line(f"zoom {self._zoom}x -- " +
                              self.lbl_zoom.text() + " across the window")
+        self._remember_soon()
 
     def _sync_wf_levels(self):
         """Show the tracked levels while auto is on, so hand-over is seamless."""
@@ -1688,6 +2671,208 @@ class MainWindow(QMainWindow):
     def _nr_level_changed(self, v: int):
         self.lbl_nr.setText(f"{v}%")
         self._apply(nr_level=float(v))
+
+    # ----------------------------------------------------------------- FT8
+    # The decoder is armed by selecting the mode and disarmed by leaving it;
+    # everything below reads what it reports.  Two things about its shape are
+    # worth knowing.  The audio is the slot clock -- the spotter measures 15 s
+    # of samples, not 15 s of wall time -- so the countdown here is a display of
+    # the spotter's own state, never a second source of truth for it.  And a
+    # decode is a row that is also a tuning button, because the frequency a
+    # message was heard on is the only thing about it worth acting on.
+
+    def _ft8_mode(self, on: bool):
+        """Entering or leaving FT8: show the strip, set the radio up, arm."""
+        self.ft8_panel.setVisible(on)
+        if not on:
+            self._ft8_timer.stop()
+            self.spotter.disarm()
+            self._ft8_restore()
+            return
+        self.spotter.set_dial(self.settings.tuned_freq)
+        self._ft8_prepare()
+        self.spotter.arm()
+        self._ft8_timer.start()
+        self._ft8_tick()
+        if not self.spotter.decoder.available:
+            self._ft8_error(self.spotter.decoder.describe())
+
+    def _ft8_prepare(self):
+        """The receiver settings a decoder wants, applied on entering FT8.
+
+        Noise reduction, audio AGC and a squelch are all subtract-from-the-
+        signal operations, and each of them damages a Costas sync or the soft
+        bits beside it.  jt9 estimates its own noise floor, so none of them has
+        anything to offer a decoder; what it wants is the passband left alone.
+        These are exactly the settings a user would have to remember to switch
+        off, which is why selecting the mode does it for them -- and why they are
+        put back on the way out (:meth:`_ft8_restore`): borrowing a setting must
+        not be the same thing as silently changing it for good.
+        """
+        self._ft8_borrowed = {
+            "nr": (self.chk_nr.isChecked(), False),
+            "audio_agc": (self.chk_aagc.isChecked(), False),
+            "squelch_db": (self.spn_sq.value(), FT8_SQUELCH_DB),
+        }
+        if self.chk_nr.isChecked():
+            self.chk_nr.setChecked(False)       # → _nr_toggled → _apply(nr=False)
+        if self.chk_aagc.isChecked():
+            self.chk_aagc.setChecked(False)
+        if self.spn_sq.value() > FT8_SQUELCH_DB:
+            self.spn_sq.setValue(FT8_SQUELCH_DB)
+        self._select_bw(ft8.FILTER_BW)          # → _bw_changed → _apply(filter_bw)
+
+    def _ft8_restore(self):
+        """Put back the listening settings FT8 switched off while it listened.
+
+        Only the ones still sitting at what FT8 forced: a value the user changed
+        *while* in the mode is theirs now, and restoring over the top of it would
+        undo the last thing they did.  A setting that was already where FT8
+        wanted it is recorded as such and restored to the same value, so this is
+        the same statement either way.
+        """
+        borrowed, self._ft8_borrowed = self._ft8_borrowed, {}
+        widgets = {"nr": self.chk_nr, "audio_agc": self.chk_aagc,
+                   "squelch_db": self.spn_sq}
+        for name, (before, forced) in borrowed.items():
+            widget = widgets[name]
+            now = (widget.value() if name == "squelch_db"
+                   else widget.isChecked())
+            if float(now) != float(forced):
+                continue
+            if name == "squelch_db":
+                widget.setValue(float(before))
+            else:
+                widget.setChecked(bool(before))
+
+    def _ft8_band_selected(self):
+        """A preset band was chosen: tune the receiver to its dial frequency."""
+        name = self.cmb_ft8band.currentData()
+        dial = ft8.dial_for(name) if name else None
+        if dial is None:
+            return
+        # Through the frequency box rather than straight at the radio, so the
+        # readout, the recentring and the receiver all move together, and a
+        # memory saved now is the band the user is actually on.  The *audio*
+        # of the band sits above this dial, which is the whole convention.
+        self.spn_freq.setValue(dial / 1e6)
+        self.spotter.set_dial(dial)
+        self._remember_soon()
+        self._on_status_line(
+            f"FT8 {name}: dial {dial/1e6:.3f} MHz, signals "
+            f"{ft8.LOW_HZ/1000:.1f}-{ft8.HIGH_HZ/1000:.1f} kHz above it")
+
+    def _ft8_every_changed(self, on: bool):
+        """Decode every slot, or just the next one."""
+        if not on and self.spotter.armed:
+            self._ft8_once = True
+        self._ft8_tick()
+        self._remember_soon()
+
+    def _ft8_clear(self):
+        self.tbl_ft8.setRowCount(0)
+        self._ft8_tick()
+
+    def _ft8_tune_to_row(self, row: int, _col: int):
+        """Click a decode: tune to the frequency it was heard on."""
+        item = self.tbl_ft8.item(row, len(FT8_COLS) - 1)
+        d = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+        if d is None:
+            return
+        self.spn_freq.setValue(d.freq / 1e6)
+        self._on_status_line(f"{d.message}   {d.freq/1e6:.6f} MHz   "
+                             f"{d.snr:+d} dB   dt {d.dt:+.1f} s")
+
+    def _ft8_add_decodes(self, decodes, _when):
+        """A slot has been decoded.  Arrives on the GUI thread, via the bridge."""
+        for d in sorted(decodes, key=lambda x: x.audio_hz):
+            row = self.tbl_ft8.rowCount()
+            self.tbl_ft8.insertRow(row)
+            fields = (d.time, f"{d.snr:+d}", f"{d.dt:+.1f}",
+                      str(d.audio_hz), d.message)
+            for col, text in enumerate(fields):
+                item = QTableWidgetItem(text)
+                if col < len(FT8_COLS) - 1:
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight
+                                          | Qt.AlignmentFlag.AlignVCenter)
+                else:
+                    item.setData(Qt.ItemDataRole.UserRole, d)
+                    item.setToolTip(
+                        f"{d.freq/1e6:.6f} MHz -- {d.audio_hz} Hz above the "
+                        f"{d.dial_hz/1e6:.3f} MHz dial\n"
+                        "Click to tune to it")
+                self.tbl_ft8.setItem(row, col, item)
+        extra = self.tbl_ft8.rowCount() - FT8_KEEP
+        if extra > 0:
+            # An operator's log, not a recording: the oldest lines go, so a
+            # night's listening cannot grow the window's memory without bound.
+            for _ in range(extra):
+                self.tbl_ft8.removeRow(0)
+        if decodes:
+            self.tbl_ft8.scrollToBottom()
+            first = decodes[0]
+            self._on_status_line(
+                f"FT8 {len(decodes)} decode(s) at {first.time} -- "
+                f"{first.message} ({first.freq/1e6:.6f} MHz)")
+        if self._ft8_once:
+            # One slot was asked for, and it has been decoded and shown.
+            self._ft8_once = False
+            self.spotter.disarm()
+        self._ft8_tick()
+
+    def _ft8_spotter_says(self, text: str):
+        """The decoder's own account of itself: a slot, totals, a failure."""
+        self._ft8_status_text = text
+        self._ft8_tick()
+
+    def _ft8_error(self, text: str):
+        self._ft8_status_text = text
+        self._on_status_line(f"FT8: {text}")
+        self._ft8_tick()
+
+    def _ft8_tick(self):
+        """Redraw the strip: the slot clock, the state, and the totals."""
+        if not self.ft8_panel.isVisible():
+            return
+        st = self.spotter.stats()
+        filling, secs = self.spotter.progress()
+        if not self.spotter.armed:
+            clock = "idle"
+        elif st["queued"]:
+            clock = "decoding…"
+        elif filling:
+            start = self.spotter.slot_start()
+            clock = (f"slot {ft8.slot_label(start)}  "
+                     f"{secs:4.1f}/{ft8.SLOT_SECONDS:.0f} s")
+        elif self.spotter.idle_seconds() > 2.0:
+            # Armed, but nothing is arriving: the receiver is stopped, or the
+            # device was lost (see _device_lost).  Saying so beats a countdown
+            # that never gets anywhere.
+            clock = "waiting for the receiver"
+        else:
+            clock = f"next slot in {ft8.slots_until(time.time()):4.1f} s"
+        bits = [clock]
+        if self.spotter.armed:
+            bits.append("this slot only" if self._ft8_once else "every slot")
+        if st["slots"]:
+            bits.append(f"{st['slots']} slot(s)")
+        # The messages *shown*, not the messages ever decoded: the list can have
+        # been cleared, and a total that survived the Clear button would read as
+        # a stuck readout.
+        rows = self.tbl_ft8.rowCount()
+        if rows:
+            bits.append(f"{rows} message(s)")
+        if st["dropped"]:
+            bits.append(f"{st['dropped']} dropped")
+        if st["error"]:
+            bits.append(st["error"])
+        text = "   ".join(bits)
+        if text != self.lbl_ft8.text():
+            self.lbl_ft8.setText(text)
+        self.lbl_ft8.setStyleSheet(
+            "color:#ffb0a0" if st["error"] else "color:#8fd8f0")
+        self.lbl_ft8.setToolTip(self._ft8_status_text
+                                or "Slot clock, decoder state, and totals")
 
     def _on_status_line(self, text: str):
         self.lbl_status.setText(text)
@@ -1801,6 +2986,10 @@ class MainWindow(QMainWindow):
         return center - half, center + half
 
     def _render(self):
+        # Before the spectrum check: the meter is fed from the DSP rather than
+        # from the display, and a frame the window has nothing new to draw is no
+        # reason for the needle to stop moving.
+        self._update_meter()
         if self._latest is None:
             return
         center, db, span = self._latest
@@ -1839,6 +3028,21 @@ class MainWindow(QMainWindow):
         self._on_status_line("error: " + msg)
 
     def closeEvent(self, ev):
+        # Before anything else: a device that fails while the window is going
+        # away must not start looking for it again.
+        self._closing = True
         self._timer.stop()
+        self._ft8_timer.stop()
+        # Whatever changed in the last second and a half is written now: the
+        # debounce must not outlive the window it was measuring.
+        self._prefs_timer.stop()
+        self._remember()
+        # Stop the decoder before the radio: disarm() stops it queueing any
+        # more slots, and the worker is a daemon thread whose jt9 call, if one
+        # is running, is left to finish rather than waited on -- a window that
+        # hangs on closing because a decoder is chewing through a slot would be
+        # a poor trade for not having to reap it.
+        self.spotter.disarm()
+        self.opener.cancel()
         self.radio.close()
         super().closeEvent(ev)

@@ -23,6 +23,7 @@ from dataclasses import dataclass, replace
 import numpy as np
 
 from . import dsp as dspmod
+from . import ft8
 from .audio import AudioOutput
 from .dsp import AUDIO_RATE, Demodulator, Downconverter, Spectrum
 
@@ -38,6 +39,13 @@ except Exception:  # pragma: no cover
     _HAVE_SOAPY = False
 
 RX = _RX
+
+# The demodulators this build has, by name.  The window offers more than this
+# (see ft8.receiver_mode) and a settings file or a command line can contain
+# anything at all, so there has to be one list of what the receiver will accept:
+# an unknown name raises inside Demodulator(...), which is reached while the
+# stream is starting.
+RECEIVER_MODES = ("am", "sam", "usb", "lsb", "cw", "nfm")
 
 # Tuner bandwidths the RSP1 actually offers (probed from the hardware).
 TUNER_BANDWIDTHS = [200_000, 300_000, 600_000, 1_536_000,
@@ -55,6 +63,22 @@ BACKLOG_SECONDS = 0.8
 # than a fixed number: at 62.5 kSps one hop is 2500 IQ samples, which is less
 # than a single 4096-point FFT, and at 2 MSps a hop holds nineteen of them.
 SPECTRUM_SEGMENTS = 16
+
+# How long the stream may go without a single sample before the device is called
+# gone.  A USB cable pulled out, the SDRplay service restarting, a driver wedged
+# after a resume: from here they all look the same -- readStream either raises
+# or keeps timing out, and nothing in the program can tell the difference.  At
+# 62.5 kSps, the slowest rate on offer, three seconds is already hundreds of
+# blocks that never arrived, so this cannot fire on a scheduling hiccup; and it
+# cannot fire at all while the radio is being stopped on purpose, because the
+# check is skipped once _running is clear.
+STALL_SECONDS = 3.0
+
+# How often a failing read is worth reporting.  Without this the status bar
+# takes about thirty identical "readStream: ..." lines in the three seconds
+# before the stall is called, and the one message that matters scrolls out of
+# sight.
+READ_ERROR_REPORT = 2.0
 
 @dataclass
 class Settings:
@@ -110,6 +134,36 @@ class Status:
     error: str = ""
 
 
+# A failed open is not always final.  The SDRplay front end is exclusive: while
+# another program holds the device the SoapySDR module cannot even enumerate it
+# -- ``Device.enumerate()`` comes back empty and ``Device()`` raises "no
+# available RSP devices found" -- so a radio that gave up at startup stayed dead
+# until the user restarted the program, which is the worst possible behaviour
+# for something left running: the other program closes and nothing happens.
+#
+# These are the failures that can clear on their own.  Anything else -- no
+# bindings at all, a driver that does not exist, an argument SoapySDR rejects
+# outright -- is reported at once instead of being waited on, because retrying
+# it would only hide the real problem behind a "waiting" message.
+_TRANSIENT_HINTS = (
+    "no available rsp",     # SDRplay: the API serves one client at a time
+    "no match",             # SoapySDR: nothing enumerated under these args
+    "not ready",            # sdrplay_api_Init()/Open() while another holds it
+    "failed to open",
+    "cannot open",
+    "in use",
+    "busy",
+    "already open",
+    "resource unavailable",
+)
+
+
+def transient_open_error(exc: BaseException | str) -> bool:
+    """Could this open failure clear by itself if we waited?"""
+    text = str(exc).lower()
+    return any(hint in text for hint in _TRANSIENT_HINTS)
+
+
 def list_devices() -> list[dict]:
     """Enumerate SoapySDR devices as plain dicts."""
     if not _HAVE_SOAPY:
@@ -135,11 +189,23 @@ class Radio:
     """
 
     def __init__(self, settings: Settings | None = None,
-                 on_spectrum=None, on_status=None, on_error=None):
+                 on_spectrum=None, on_status=None, on_error=None,
+                 on_lost=None, on_audio=None):
         self.settings = settings or Settings()
         self.on_spectrum = on_spectrum
         self.on_status = on_status
         self.on_error = on_error
+        # Demodulated audio, as it is handed to the sound card.  FT8 taps this
+        # to cut the audio into slots; anything that uses it must return
+        # quickly, because it is called on the DSP thread with the radio in
+        # hand (see ft8.FT8Spotter.feed).  It is deliberately *before* the
+        # volume and mute, so what a decoder hears does not depend on either.
+        self.on_audio = on_audio
+        # Called (from the reader thread) when the stream has stopped in a way
+        # that reading again cannot fix.  Whoever owns this object has to close
+        # it -- the device is deliberately left for them to release, so that
+        # every device call still happens on one thread.
+        self.on_lost = on_lost
         self.status = Status()
 
         self._dev = None
@@ -155,6 +221,8 @@ class Radio:
         self._pending_gain: Settings | None = None
         self._actual_center = self.settings.center_freq
         self._last_status = 0.0
+        self._last_data = 0.0            # when the newest sample arrived
+        self._last_error_report = 0.0
 
         self.spectrum = Spectrum(self.settings.n_fft, self.settings.spec_avg)
         self.ddc: Downconverter | None = None
@@ -170,13 +238,30 @@ class Radio:
         return self._dev is not None
 
     def open(self):
-        """Open the device and start streaming.  Idempotent."""
+        """Open the device and start streaming.  Idempotent.
+
+        Atomic: a failure at any point leaves nothing behind.  A device that
+        was made but never reached streaming used to stay assigned to this
+        object, which both made :attr:`opened` lie and left the next attempt to
+        claim a second handle from a front end that only serves one at a time --
+        so a retry after a failed start failed for the wrong reason.
+        """
         if self._running:
             return
         if not _HAVE_SOAPY:
             raise RuntimeError("SoapySDR Python bindings are not available "
                                "(install python3-soapysdr)")
+        # A handle from an earlier attempt (failed mid-flight, or left over from
+        # a path that did not clean up) is released before trying again.
+        if self._dev is not None:
+            self.close()
+        try:
+            self._open_stream()
+        except BaseException:
+            self.close()
+            raise
 
+    def _open_stream(self):
         s = self.settings
         # NB: this build of the bindings only accepts a *string* kwargs blob;
         # passing a dict raises "SoapySDR::Device::make() no match".
@@ -225,6 +310,7 @@ class Radio:
             running=True, sample_rate=s.sample_rate, center=s.center_freq,
             tuned=s.tuned_freq, actual_rate=self._dev.getSampleRate(RX, 0),
             audio_desc=self.audio.backend.describe(), message="streaming")
+        self._last_data = time.monotonic()
         self._reader = threading.Thread(target=self._reader_loop, name="sdr-reader",
                                         daemon=True)
         self._dsp = threading.Thread(target=self._dsp_loop, name="sdr-dsp",
@@ -247,6 +333,7 @@ class Radio:
 
     def close(self):
         self._running = False
+        self._last_data = 0.0
         for t in (self._reader, self._dsp):
             if t is not None:
                 t.join(timeout=2.0)
@@ -278,7 +365,12 @@ class Radio:
     def _build_dsp(self):
         s = self.settings
         self.ddc = Downconverter(float(s.sample_rate))
-        self.demod = Demodulator(s.mode, s.filter_bw, s.cw_pitch,
+        # "ft8" is a window mode, not a demodulator: the receiver is asked for
+        # the demodulation FT8 is heard through (see ft8.receiver_mode).  Done
+        # here as well as in the window because the settings the radio is built
+        # from can come straight from the command line, and an unknown mode
+        # would otherwise raise while the stream was starting.
+        self.demod = Demodulator(ft8.receiver_mode(s.mode), s.filter_bw, s.cw_pitch,
                                  agc=s.audio_agc, squelch_db=s.squelch_db,
                                  nr=s.nr, nr_level=s.nr_level / 100.0)
         self.spectrum = Spectrum(s.n_fft, s.spec_avg)
@@ -300,7 +392,7 @@ class Radio:
                 abs(s.spec_avg - getattr(self.spectrum, "avg", -1)) > 1e-9:
             self.spectrum = Spectrum(s.n_fft, s.spec_avg)
         if self.demod is not None:
-            self.demod.configure(s.mode, s.filter_bw, s.cw_pitch)
+            self.demod.configure(ft8.receiver_mode(s.mode), s.filter_bw, s.cw_pitch)
             self.demod.agc.enabled = s.audio_agc
             self.demod.squelch_db = s.squelch_db
             # Plain attribute writes: the DSP thread reads these once per
@@ -351,17 +443,29 @@ class Radio:
                 sr = self._dev.readStream(self._stream, [buf], buf.size,
                                           timeoutUs=500_000)
             except Exception as exc:
-                self._error(f"readStream: {exc}")
+                self._stream_error(f"readStream: {exc}")
                 time.sleep(0.1)
-                continue
-            if sr.ret > 0:
-                chunk = buf[:sr.ret].copy()
-                with self._lock:
-                    if len(self._chunks) == self._chunks.maxlen:
-                        self.status.dropped_chunks += 1
-                    self._chunks.append(chunk)
-            elif sr.ret == -4:            # SOAPY_SDR_OVERFLOW: just continue
-                continue
+            else:
+                if sr.ret > 0:
+                    chunk = buf[:sr.ret].copy()
+                    with self._lock:
+                        if len(self._chunks) == self._chunks.maxlen:
+                            self.status.dropped_chunks += 1
+                        self._chunks.append(chunk)
+                    self._last_data = time.monotonic()
+                # ret 0 (nothing waiting) and -4 (SOAPY_SDR_OVERFLOW) are both
+                # ordinary: neither means anything is wrong yet.
+
+            # A device can also fail by going quiet -- no exception, no
+            # samples -- and reading it again is what used to happen for ever,
+            # leaving a frozen waterfall and a button that stops nothing.  Once
+            # the silence outlasts STALL_SECONDS the stream is over: stop both
+            # loops and tell the owner, which closes the device and looks for
+            # it again with the same retry it uses at startup.
+            silence = time.monotonic() - self._last_data
+            if self._running and silence > STALL_SECONDS:
+                self._lost(f"no samples for {silence:.0f} s")
+                return
 
     def _dsp_loop(self):
         hop = self.ddc.hop_in
@@ -458,6 +562,8 @@ class Radio:
         audio = self.demod(bb)
         self.status.rx_dbm = self.demod.signal_db
         self.status.audio_db = dspmod.audio_rms_db(audio)
+        if self.on_audio is not None:
+            self.on_audio(audio)
         if self.audio is not None:
             self.audio.write(audio)
 
@@ -469,6 +575,24 @@ class Radio:
     def _emit_status(self):
         if self.on_status is not None:
             self.on_status(self.status)
+
+    def _stream_error(self, msg: str):
+        """A failing read: worth saying so, not worth saying thirty times."""
+        now = time.monotonic()
+        if now - self._last_error_report < READ_ERROR_REPORT:
+            return
+        self._last_error_report = now
+        self._error(msg)
+
+    def _lost(self, why: str):
+        """The stream is over and reading again cannot bring it back."""
+        self._running = False
+        self.status.running = False
+        self.status.message = "device lost"
+        self.status.error = f"device stopped: {why}"
+        self._emit_status()
+        if self.on_lost is not None:
+            self.on_lost(why)
 
     def _error(self, msg: str):
         self.status.error = msg

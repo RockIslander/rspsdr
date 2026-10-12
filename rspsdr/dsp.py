@@ -487,6 +487,12 @@ class Demodulator:
         self.dc = None
         self.squelch_db = float(squelch_db)
         self.signal_db = -200.0
+        # The level inside the filter being listened to, in dBFS, which is what
+        # a signal meter wants: signal_db above is the whole 48 kHz baseband,
+        # so a carrier thirty kilohertz away moves it.  Measured between the
+        # channel filter and the detector, i.e. before AGC, noise reduction and
+        # the volume, so it is a property of what arrived at the receiver.
+        self.passband_db = -200.0
         self.open = True
         self._prev = 0.0 + 0.0j
         self._nfm_lp = None
@@ -533,6 +539,19 @@ class Demodulator:
             return -self.pitch
         return 0.0
 
+    def _passband(self, x: np.ndarray) -> np.ndarray:
+        """The channel filter, plus the level of what came out of it.
+
+        Every mode but the synchronous one filters exactly once per block, so
+        this is the one place the passband level can be taken without running
+        the filter twice (which would both cost the work and advance its state
+        by two blocks per block).
+        """
+        f = self.band(x)
+        self.passband_db = 10.0 * math.log10(
+            float(np.mean(np.abs(f) ** 2)) + 1e-20)
+        return f
+
     # -- processing ------------------------------------------------
     def __call__(self, x: np.ndarray) -> np.ndarray:
         if x.size == 0:
@@ -551,7 +570,7 @@ class Demodulator:
             # asymmetric filter expects it, then treat it as USB.
             x = np.conjugate(x)
         if m == "nfm":
-            f = self.band(x)
+            f = self._passband(x)
             prev = np.empty_like(f)
             prev[0] = self._prev
             prev[1:] = f[:-1]
@@ -560,7 +579,7 @@ class Demodulator:
             y = self._nfm_lp(d)
             y = self.dc(y)
         elif m == "am":
-            y = self.dc(np.abs(self.band(x)).astype(np.float32))
+            y = self.dc(np.abs(self._passband(x)).astype(np.float32))
         elif m == "sam":
             # Feed-forward synchronous detector: track the carrier with a very
             # narrow low-pass, normalise it, then product-detect.  Much better
@@ -573,9 +592,10 @@ class Demodulator:
                                         x.astype(np.complex64), zi=self._sam_zi)
             mag = np.abs(car)
             mag[mag < 1e-9] = 1e-9
-            y = self.dc((self.band(x) * np.conjugate(car / mag)).real.astype(np.float32))
+            y = self.dc((self._passband(x)
+                         * np.conjugate(car / mag)).real.astype(np.float32))
         else:  # usb / cw -- the filter already returns real audio
-            y = self.dc(self.band(x))
+            y = self.dc(self._passband(x))
 
         # Denoise *before* the AGC: a frequency-domain floor estimate only works
         # on a signal whose level is not being rescaled underneath it.
