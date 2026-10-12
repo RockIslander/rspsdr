@@ -27,7 +27,8 @@ import numpy as np  # noqa: E402
 import pyqtgraph as pg  # noqa: E402
 from PyQt6.QtCore import QEvent, QPoint, QPointF, Qt, QTimer  # noqa: E402
 from PyQt6.QtGui import QImage, QMouseEvent, QWheelEvent  # noqa: E402
-from PyQt6.QtWidgets import QApplication, QHBoxLayout, QLabel  # noqa: E402
+from PyQt6.QtWidgets import (QApplication, QHBoxLayout, QLabel,  # noqa: E402
+                             QSplitter)
 
 from rspsdr import logo, ui  # noqa: E402
 from rspsdr.memory import MemoryStore  # noqa: E402
@@ -296,12 +297,16 @@ def main() -> int:
                   f"range {curve[1].min():.1f}..{curve[1].max():.1f} dB")
         check("waterfall holds real signal (not all floor)",
               float(wf.max()) > -100.0, f"max {wf.max():.1f} dB")
-        # Auto keeps the spectrum's own painted resolution; the fixed 800 this
-        # used to assert threw away most of what a large FFT measured.
-        check("waterfall dimensions",
-              wf.shape[0] == ui.WF_ROWS and wf.shape[1] == ui.WF_AUTO_COLS,
+        # The picture is sized to the plot it is drawn in -- one row per pixel
+        # of height, one column per pixel of width -- rather than to a fixed
+        # 240x800, which is both what SDR++ does and the only shape at which
+        # nothing has to be stretched by the rasteriser.
+        check("waterfall is sized to its own plot",
+              wf.shape[0] == win.waterfall.rows()
+              and wf.shape[1] == win.waterfall.cols()
+              and ui.WF_MIN_ROWS <= wf.shape[0] <= ui.WF_MAX_ROWS,
               f"{wf.shape[0]} rows x {wf.shape[1]} columns, "
-              f"{win.waterfall._vis_bins} bins on offer")
+              f"{win.waterfall.bins()} bins on offer")
         check("marker sits on the tuned frequency",
               abs(win.spectrum.marker.value() - settings.tuned_freq / 1e6) < 1e-6)
         check("spectrum frames rendered", win.frames_drawn > 20,
@@ -658,11 +663,13 @@ def main() -> int:
               f"{win.waterfall._cmap_key} reverse={win.waterfall._cmap_rev}")
 
         # ---- waterfall frequency detail -------------------------------
-        # The picture used to be built from at most 800 columns, so an 8192- or
-        # 16384-point FFT measured far more detail than the waterfall could
-        # show.  The widget is driven with frames of a known bin count so the
-        # column arithmetic is checked exactly, rather than through whatever
-        # the live radio happens to be delivering.
+        # The picture used to be built from at most 800 columns whatever the
+        # plot was, so an 8192- or 16384-point FFT measured far more detail
+        # than the waterfall could show and the 800 columns were stretched back
+        # across the window.  "Screen" -- the default -- is SDR++'s answer: the
+        # row is as wide as the plot has pixels.  The widget is driven with
+        # frames of a known bin count so the column arithmetic is checked
+        # exactly, rather than through whatever the live radio is delivering.
         def detail_index(cols: int) -> int:
             return next(i for i in range(win.cmb_wfdetail.count())
                         if win.cmb_wfdetail.itemData(i) == cols)
@@ -675,15 +682,34 @@ def main() -> int:
                                centre - span, centre + span)
             return db
 
+        def plot_pixels() -> int:
+            """The plot area's own width, which is what Screen has to match."""
+            wf = win.waterfall
+            return int(round(wf.plotItem.vb.width() * wf.devicePixelRatioF()))
+
         offered = [c for _, c in ui.WF_DETAILS if c]
-        check("the detail list offers more than the old fixed 800 columns",
-              ui.WF_AUTO_COLS > 800 and ui.WF_MAX_COLS == max(offered)
+        check("the detail list starts at Screen and keeps the fixed sizes",
+              win.cmb_wfdetail.itemData(0) == ui.SCREEN_DETAIL
+              and ui.WF_MAX_COLS == max(offered)
               and offered == sorted(set(offered)),
-              f"Auto is {ui.WF_AUTO_COLS} columns, up to {ui.WF_MAX_COLS}")
+              f"Screen, then {offered[0]}..{ui.WF_MAX_COLS} columns")
+
+        # Screen is not a column count, it is the plot's own width, so it has to
+        # answer with the width the plot actually has.
+        win.cmb_wfdetail.setCurrentIndex(detail_index(ui.SCREEN_DETAIL))
+        fake_frame(16384, -80.0)
+        check("Screen matches a row to the plot's own pixels",
+              win.waterfall.cols() == min(16384, plot_pixels()),
+              f"{win.waterfall.cols()} columns for {plot_pixels()} px of plot")
+        check("and the history is one row per pixel of height",
+              win.waterfall.rows() == win.waterfall._wf.shape[0]
+              and ui.WF_MIN_ROWS <= win.waterfall.rows() <= ui.WF_MAX_ROWS,
+              f"{win.waterfall.rows()} rows, bounds "
+              f"{ui.WF_MIN_ROWS}..{ui.WF_MAX_ROWS}")
 
         win.cmb_wfdetail.setCurrentIndex(detail_index(ui.WF_MAX_COLS))
         fake_frame(16384, -80.0)
-        check("a larger detail setting keeps the detail the FFT provides",
+        check("a fixed detail setting uses every column it was asked for",
               win.waterfall.cols() == ui.WF_MAX_COLS,
               f"{win.waterfall.cols()} columns from 16384 bins")
 
@@ -697,29 +723,189 @@ def main() -> int:
               win.waterfall.cols() == 512,
               f"{win.waterfall.cols()} columns from 512 bins")
 
-        # Only the resolution changes here, never the span the rows were taken
-        # over, so the history is still meaningful and has to survive the move
-        # instead of blanking the picture every time the control is touched.
+        # Peak, not mean, when the bins outnumber the columns.  This is what
+        # SDR++'s doZoom does, and it is the whole difference between a weak
+        # carrier drawn as a line and the same carrier averaged into the noise:
+        # ten bins at -90 dB with one at -10 read -10 under a maximum and
+        # -82 under a mean.
         win.cmb_wfdetail.setCurrentIndex(detail_index(1600))
         fake_frame(16384, -90.0, peak_at=8192)
         win.waterfall._wf[:] = ui.WF_BLANK_DB           # only the newest row real
         fake_frame(16384, -90.0, peak_at=8192)
-        marked = float(win.waterfall._wf[0].max())
+        row = win.waterfall._wf[0]
+        marked = float(row.max())
+        mean_rounded = float(row.mean())
+        check("a lone carrier keeps its strength when the row is pooled",
+              marked > -20.0 and mean_rounded < -60.0,
+              f"carrier {marked:.1f} dB in a row averaging {mean_rounded:.1f} dB "
+              f"over {win.waterfall.cols()} columns")
+
+        # Only the resolution changes here, never the span the rows were taken
+        # over, so the history is still meaningful and has to survive the move
+        # instead of blanking the picture every time the control is touched.
         win.cmb_wfdetail.setCurrentIndex(detail_index(4800))
         wf = win.waterfall._wf
         check("a detail change resamples the history instead of discarding it",
-              wf.shape[0] == ui.WF_ROWS and wf.shape[1] == 4800
+              wf.shape[0] == win.waterfall.rows() and wf.shape[1] == 4800
               and abs(float(wf[0].max()) - marked) < 1e-3,
               f"carrier {marked:.1f} dB -> {float(wf[0].max()):.1f} dB over "
               f"{wf.shape[1]} columns")
         check("and the bright row did not merely come back blank",
               float(wf.max()) > -100.0, f"max {float(wf.max()):.1f} dB")
 
-        win.cmb_wfdetail.setCurrentIndex(0)             # back to Auto
-        check("Auto follows the data again",
-              win.waterfall.cols() == ui.WF_AUTO_COLS,
+        # The picture is pixels, so the levels are baked in rather than applied
+        # when the picture is drawn.  The pixels have to be the ones the colour
+        # map gives for the dB value, and a level change has to recolour the
+        # rows already on screen -- otherwise the picture would keep the old
+        # window until it scrolled away.
+        lut = win.waterfall._lut
+        lo, hi = win.waterfall.levels()
+        newest = win.waterfall._wf[0]               # after the resample
+        col = int(np.argmax(newest))
+        value = float(newest[col])
+        idx = max(0, min(255, int(round((value - lo) * 255.0 / (hi - lo)))))
+        px = tuple(int(v) for v in win.waterfall._rgba[0, col])
+        check("the picture's pixels are the colour map at those levels",
+              px == tuple(int(v) for v in lut[idx]),
+              f"rgba {px} for {value:.1f} dB, colour index {idx}")
+
+        # A history of real rows, so this is about the levels and not about the
+        # blank rows, which stay black whatever the levels say.
+        win.waterfall._wf[:] = -60.0
+        win.waterfall._repaint_history()
+        oldest = tuple(int(v) for v in win.waterfall._rgba[-1, 0])
+        win.chk_wfauto.setChecked(False)                # hand the levels over
+        win.spn_wflo.setValue(-100.0)
+        win.spn_wfhi.setValue(-30.0)
+        recoloured = tuple(int(v) for v in win.waterfall._rgba[-1, 0])
+        check("a level change recolours the rows already drawn",
+              recoloured != oldest and oldest != (0, 0, 0, 255)
+              and win.waterfall.levels() == (-100.0, -30.0),
+              f"oldest row {oldest} -> {recoloured} at levels "
+              f"{win.waterfall.levels()}")
+        win.chk_wfauto.setChecked(True)
+
+        # A row with no data in it yet must be black, not whatever colour sits
+        # at the bottom of the scale: the brightest entry of a reversed map drew
+        # a band of full-brightness pixels across a history that had not filled
+        # in yet.
+        win.waterfall.set_colormap("viridis", True)
+        win.waterfall.clear_history()
+        bright = int(win.waterfall._rgba[..., :3].max())
+        check("a cleared history is black under a reversed colour map",
+              bright == 0, f"brightest cleared pixel {bright}")
+        win.waterfall.set_colormap("spectrum", False)
+
+        # What is *drawn* has to follow the data, not merely the array behind
+        # it.  Handing an ImageItem the same buffer every frame is the classic
+        # way to end up with an image that is perfectly up to date and never
+        # re-rendered, so this reads the pixels the plot produced.
+        win.cmb_wfdetail.setCurrentIndex(detail_index(ui.SCREEN_DETAIL))
+        win.waterfall.set_levels(False, 30.0, -100.0, -40.0)
+        # The view is pinned to the window the row is taken over, so where the
+        # carrier should land follows from the axis mapping alone.  (The timer
+        # keeps re-centring the view on the live receiver otherwise.)
+        live = win.radio.status.center
+        win.waterfall.set_view(live - span, live + span)
+        flat = np.full(16384, -110.0, dtype=np.float32)
+        flat[8192] = -20.0                              # one carrier, on centre
+        win.waterfall.push(live, flat, span, live - span, live + span)
+        shot = win.waterfall.grab().toImage()
+        sw, sh = shot.width(), shot.height()
+        pix = np.frombuffer(shot.constBits().asstring(shot.sizeInBytes()),
+                            np.uint8).reshape(sh, shot.bytesPerLine() // 4, 4)[:, :sw, :]
+        # The newest line is the first one drawn, at the top of the plot; the
+        # leftmost columns are the frequency scale, not the picture.
+        band = pix[0:14, ui.PLOT_AXIS_WIDTH:, :3].sum(axis=2).max(axis=0)
+        found = ui.PLOT_AXIS_WIDTH + int(np.argmax(band))
+        scene = win.waterfall.plotItem.vb.mapViewToScene(QPointF(live / 1e6, 1.0))
+        want = win.waterfall.mapFromScene(scene).x()
+        check("the drawn picture puts a carrier where the axis says it is",
+              abs(found - want) <= 3
+              and float(band.max()) > 1.5 * float(np.median(band)),
+              f"brightest column {found} px, carrier at {want:.0f} px "
+              f"of {sw} px")
+        win.waterfall.set_levels(True, 30.0, -110.0, -40.0)
+        win.waterfall.set_view(*win._view(live, span))
+
+        # The readout is how anyone can tell whether the FFT or the picture is
+        # the limit, which the column count on its own does not say.
+        win._wf_detail_readout()
+        check("the readout says what a column is worth in Hz",
+              "kHz per column" in win.lbl_status.text(),
+              win.lbl_status.text())
+
+        win.cmb_wfdetail.setCurrentIndex(detail_index(ui.SCREEN_DETAIL))
+        fake_frame(16384, -80.0)
+        check("Screen follows the plot again",
+              win.waterfall.cols() == min(16384, plot_pixels()),
               f"{win.waterfall.cols()} columns, "
-              f"{win.waterfall._vis_bins} bins on offer")
+              f"{win.waterfall.bins()} bins on offer")
+
+        # ---- the picture follows the plot it is in ----------------------
+        # Dragging the splitter is how a user changes the waterfall's height,
+        # and both dimensions are supposed to follow it.
+        split = win.waterfall.parentWidget()
+        check("the waterfall lives in a splitter", isinstance(split, QSplitter))
+        if isinstance(split, QSplitter):
+            rows_before, cols_before = win.waterfall.rows(), win.waterfall.cols()
+            px_before = plot_pixels()
+            above, below = split.sizes()          # [spectrum, waterfall]
+            split.setSizes([max(140, above - 90), below + 90])
+            # Width decides the columns, so widen the window too -- unless it is
+            # already as wide as the screen, in which case the invariant is all
+            # there is to check.
+            win.resize(min(win.width() + 120, 1900), win.height())
+            QApplication.processEvents()
+            check("a taller plot means more rows of history",
+                  win.waterfall.rows() > rows_before,
+                  f"{rows_before} -> {win.waterfall.rows()} rows")
+            fake_frame(16384, -80.0)              # bins to spare: width decides
+            check("and Screen tracks whatever width the plot ended up with",
+                  win.waterfall.cols() == min(16384, plot_pixels())
+                  and (plot_pixels() == px_before
+                       or win.waterfall.cols() > cols_before),
+                  f"{cols_before} -> {win.waterfall.cols()} columns for "
+                  f"{px_before} -> {plot_pixels()} px of plot")
+            split.setSizes([above, below])
+            QApplication.processEvents()
+
+        # ---- the FFT sizes the resolution actually comes from -----------
+        # A bin is span/n_fft wide and the waterfall draws the visible slice of
+        # them, so a bigger FFT is a finer waterfall.  The two large sizes only
+        # became affordable when the transform moved to scipy.fft.
+        sizes = [win.cmb_fft.itemData(i) for i in range(win.cmb_fft.count())]
+        check("the FFT list reaches the sizes a deep zoom needs",
+              sizes == sorted(sizes) and max(sizes) >= 32768
+              and min(sizes) >= 1024,
+              f"{min(sizes)}..{max(sizes)} points, {len(sizes)} choices")
+        check("and keeps the sample rate the span expects by default",
+              int(win.cmb_fft.currentData()) >= 4096,
+              f"{win.cmb_fft.currentData()} points")
+
+        # ---- one repaint has to fit in the repaint interval -------------
+        # The GUI and the DSP share four cores, so what the picture costs per
+        # frame is not a private matter: a repaint that overruns REPAINT_MS
+        # stutters the display *and* starves the DSP thread of CPU.  This is the
+        # whole path a frame takes -- row building, the level tracking, the
+        # colour mapping and both plots' real rasterised paints.
+        bench_db = np.random.randn(16384).astype(np.float32) - 90.0
+
+        def repaint_once():
+            win.waterfall.push(centre, bench_db, span, centre - span, centre + span)
+            win.spectrum.update_spectrum(centre, bench_db, span,
+                                         centre - span, centre + span)
+            win.grab()
+
+        repaint_once()                                  # warm up the caches
+        t0 = time.perf_counter()
+        for _ in range(5):
+            repaint_once()
+        per_frame = (time.perf_counter() - t0) / 5.0 * 1e3
+        check("a repaint of the whole window fits in the repaint interval",
+              per_frame < ui.REPAINT_MS,
+              f"{per_frame:.1f} ms of the {ui.REPAINT_MS} ms budget, "
+              f"{win.waterfall.cols()} columns")
 
         # ---- the helper that decides what is on screen ------------------
         # visible_bins picks which slice of the full-span FFT the plots show,

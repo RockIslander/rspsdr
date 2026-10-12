@@ -273,6 +273,37 @@ check("the average blends successive frames",
       f"full-scale frame {float(h1[N // 2]):.2f} dB, after a -20 dB frame "
       f"{float(h2[N // 2]):.2f} dB with avg=0.5")
 
+# The transform is scipy.fft, which is several times faster than numpy.fft here
+# and is what makes the large FFT sizes affordable, so it has to agree with the
+# plain reference.  It also has to stay in single precision: numpy.fft used to
+# promote a float32 transform to double, doubling the work behind the caller's
+# back, and that promotion coming back is exactly what would spoil the 32768-
+# and 65536-point settings.
+BIG = 8192
+# Deliberately not a pure tone: an exact transform of an exact tone bottoms out
+# at the round-off floor, where the two libraries are free to disagree by tens
+# of dB about bins that hold a billionth of full scale.  A small noise floor
+# keeps every bin well above that, so a difference means a real difference.
+rng = np.random.default_rng(11)
+stack = np.vstack([
+    (tone(AUDIO_RATE, k * AUDIO_RATE / BIG, BIG)
+     + rng.standard_normal(BIG).astype(np.float32) * 0.01).astype(np.complex64)
+    for k in (-300, 0, 300)])
+win = np.hanning(BIG).astype(np.float32)
+ref_power = np.mean(np.abs(np.fft.fftshift(
+    np.fft.fft(stack * win, axis=1), axes=1)) ** 2, axis=0)
+ref_db = 10.0 * np.log10(ref_power / (float(win.sum()) ** 2) + 1e-20)
+got_db = Spectrum(BIG, avg=1.0)(stack.ravel())
+spread = float(np.abs(got_db - ref_db).max())
+check("the spectrum matches a plain numpy transform",
+      got_db.shape == ref_db.shape and spread < 0.05
+      and float(ref_db.min()) > -120.0,
+      f"max difference {spread:.2e} dB over {got_db.size} bins, floor "
+      f"{float(ref_db.min()):.1f} dB")
+check("and stays in single precision",
+      got_db.dtype == np.float32 and sp2(tone(AUDIO_RATE, 0.0, N)).dtype == np.float32,
+      f"{got_db.dtype}")
+
 print("\n== audio conversion ==")
 sig = np.array([0.0, 1.0, -1.0, 2.0, -2.0], np.float32)
 check("to_int16 clips and scales",

@@ -41,7 +41,7 @@ Runtime, all available from the Debian/Ubuntu archives:
 | SDRplay driver | `soapysdr-module-sdrplay3` + the SDRplay API service | talks to the RSP1 |
 | Qt 6 bindings | `python3-pyqt6`, `python3-pyqt6.qtmultimedia` | the GUI and audio |
 | Plotting | `python3-pyqtgraph` | spectrum and waterfall |
-| Numerics | `python3-numpy`, `python3-scipy` | DSP |
+| Numerics | `python3-numpy`, `python3-scipy` | DSP, and the FFT (see below) |
 
 ```bash
 sudo apt install python3-soapysdr soapysdr-module-sdrplay3 python3-pyqtgraph \
@@ -58,7 +58,7 @@ SoapySDRUtil --find             # should print "driver = sdrplay"
 ## Installing from a Debian package
 
 ```bash
-sudo apt install ./rspsdr_1.0.0_all.deb     # apt, not dpkg: it pulls the deps
+sudo apt install ./rspsdr_1.0.1_all.deb     # apt, not dpkg: it pulls the deps
 ```
 
 The package is architecture-independent and installs:
@@ -86,7 +86,7 @@ Remove it with `sudo apt remove rspsdr` (your saved channels in
 ## Building the package
 
 ```bash
-dpkg-buildpackage -us -uc -b        # leaves ../rspsdr_1.0.0_all.deb
+dpkg-buildpackage -us -uc -b        # leaves ../rspsdr_1.0.1_all.deb
 DEB_OUT=dist debian/rules binary    # or build it into dist/ instead
 ```
 
@@ -95,8 +95,8 @@ The build needs `dpkg-dev` and nothing else — RSPSDR is pure Python, so
 requiring debhelper. `debian/rules test` runs the offline test suite; it is
 kept out of the package build, which must not need Qt or a sound card.
 
-A source package (`rspsdr_1.0.0.dsc` and its `.tar.xz`) is built with
-`dpkg-source -b .` from a directory named `rspsdr-1.0.0`, which is the name
+A source package (`rspsdr_1.0.1.dsc` and its `.tar.xz`) is built with
+`dpkg-source -b .` from a directory named `rspsdr-1.0.1`, which is the name
 `3.0 (native)` gives the tarball's root. Build products, caches and test output
 are excluded by `debian/source/options`, so a tarball built straight after a
 compile is still clean.
@@ -172,18 +172,34 @@ swaps the dark and bright ends. A ceiling set below the floor is refused rather
 than turned into a blank picture.
 
 **Detail** sets the waterfall's frequency resolution — how many columns
-(frequency points) a line is built from. *Auto* keeps every bin the FFT
-provides, up to the 2048 points the spectrum itself is painted with, so a large
-transform is no longer crushed into 800 columns; the fixed sizes take it to
-6400 when you want more detail across a zoomed view than the spectrum draws. A
-line is never stretched beyond the data behind it — asking for more columns than
-there are visible bins leaves the picture alone — and moving the control
+(frequency points) a line is built from. ***Screen***, the default, matches a
+line to the plot's own pixel width. That is what SDR++ does, and it is the only
+width at which nothing has to be stretched: the picture is 1:1 with the display,
+and a narrow carrier lands on its own pixel instead of being averaged with its
+neighbours. The fixed sizes ask for *more* columns than the screen has pixels,
+which buys a smoother reduction of a large FFT at a proportional cost per
+repaint. The status bar says what a column is worth in Hz and how many bins the
+FFT had on offer, so it is clear whether the picture or the FFT is the limit.
+
+Two more things follow the display: the history is one row per pixel of plot
+height, so the lines are as fine as the screen can show them rather than a fixed
+240 stretched over whatever height the window has; and bins are reduced to
+columns by **maximum**, as SDR++'s `doZoom` does, so a carrier that falls
+between two columns keeps its full strength instead of being averaged into the
+noise — ten bins at −90 dB with one at −10 read −10, where a mean would read
+−82. A line is never stretched beyond the data behind it: asking for more
+columns than there are visible bins leaves the picture alone. Moving the control
 resamples the history already on screen onto the new grid instead of blanking
 it, because only the resolution changed and the rows still mean what the colour
-scale says. It is the heaviest of the display controls — measured on this
-machine, a repaint takes about 2.5 ms on *Auto* and 4.0 ms at 6400 columns with
-a 16384-point FFT, out of a 45 ms frame — so leave it on *Auto* unless you want
-the extra detail.
+scale says.
+
+The FFT size is where the resolution ultimately comes from — a bin is the span
+divided by `n_fft`, and the waterfall draws the visible slice of those bins — so
+the **FFT** list now goes to 32768 and 65536, four times finer than it used to
+stop at. That only became affordable when the transform moved to `scipy.fft`:
+measured here, sixteen 16384-point transforms of complex64 take 2.1 ms where
+`numpy.fft` took 5.2 ms, and the app's share of one core at 2 MSps is 11.8 % at
+4096, 13.2 % at 16384 and 17.5 % at 65536.
 
 **Zoom** magnifies both plots about the receiver centre: 1x shows the whole
 receiver span, 16x narrows it to a 125 kHz window at 2 MSps. Use the **-** and
@@ -274,6 +290,30 @@ A few decisions worth knowing about:
   not measured through a gain that keeps changing. Output samples are
   index-aligned with the input; the newest 384 samples (8 ms) are held back
   while the last transform fills.
+- **The spectrum is a `scipy.fft`, single-precision transform.** `scipy.fft`
+  beats `numpy.fft` by 2.4x on the CPUs this runs on and, unlike numpy before
+  2.0, keeps complex64 in complex64 instead of quietly promoting to double and
+  doubling the work. scipy was already a dependency (the resampler uses
+  `scipy.signal`), so the large FFT sizes cost nothing new to install. The
+  window is shifted once on the averaged line rather than once per segment, and
+  the test suite pins the result against a plain `numpy.fft` reference so the
+  next version of either library cannot quietly change the numbers.
+- **The waterfall is pixels, not dB values.** Two copies of the history are
+  kept: the dB rows, which are the truth, and the RGBA pixels the plot draws.
+  Both follow the display: one column per pixel of plot width (so nothing is
+  stretched) and one row per pixel of height (so the lines are as fine as the
+  screen can show), which is how SDR++ sizes its waterfall too.
+  A frame colourises its new row and shifts the rest — about 0.1 ms — where
+  re-applying levels to every pixel of every frame measured 21 ms for a
+  240x6400 picture. A floor, ceiling, contrast or colour change rebuilds the
+  whole picture from the dB rows, so the controls still affect what is already
+  on screen, and a row with no data in it yet is drawn black rather than in
+  whatever colour sits at the bottom of a reversed palette.
+- **Antialiasing is off, deliberately.** On a machine whose display is driven
+  by integrated graphics every line is rasterised on the CPU, and Qt's
+  antialiased path cost 81 ms a frame against 21 ms without it — two thirds of
+  the frame budget, spent smoothing a 1 px grid. The waterfall image, which is
+  the one thing that does want interpolation, asks for it by itself.
 - **Under CPU pressure the radio stays live.** If the DSP cannot keep up, the
   oldest RF is discarded rather than letting latency grow without bound. The
   status bar shows the backlog and a drop count.
@@ -321,9 +361,18 @@ files. `tests/gui_smoke.py` opens the real device, waits for frames, exercises
 every control (including saving, recalling and deleting a memory, switching NR
 on, the waterfall levels/colour/detail/zoom, and retuning while zoomed) and
 writes a screenshot. The waterfall's resolution is checked against frames of a
-known bin count — that a larger setting keeps more of the FFT, that a line is
-never stretched beyond its own data, and that a detail change resamples the
-history rather than discarding it. It clicks the waterfall with a real mouse event and checks the
+known bin count — that *Screen* equals the plot's own pixel width and follows a
+resize, that a fixed setting keeps every column it was asked for, that a line is
+never stretched beyond its own data, that a lone carrier survives being pooled
+into the picture (maximum, not mean), and that a detail change resamples the
+history rather than discarding it. It checks that the drawn pixels really are
+the colour map's entry for the dB value behind them, that a level change
+recolours the rows already on screen, and that a cleared history is black under
+a reversed palette. It times a full repaint of the window — row building, level
+tracking, colour mapping and both plots' real rasterised paints — against the
+45 ms repaint interval, so a change that makes the display four times more
+expensive than it is fails the run instead of being noticed on the radio. It
+clicks the waterfall with a real mouse event and checks the
 tuning lands on the frequency the axis shows there, that the spectrum and
 waterfall put a given frequency at the same pixel, and that each mode's passband
 is drawn on the right side of the dial. It also checks the window itself: that
@@ -344,14 +393,37 @@ the **installed** copy under `~/.local/share` rather than the source tree,
 because that is what the launcher and the menu entry actually start. It skips
 itself, with exit 0, when there is no display or no radio.
 
-Measured on a 4-core desktop at 2 MSps: **~14 % of one core** for the DSP and
-about 2 ms to repaint, rising to about **19 %** with noise reduction at full
-strength.
+Measured on the 4-core machine this was tuned for (i5-4590T, Intel HD 4600
+graphics, 2 MSps): **11.8 % of one core** for the DSP at the default 4096-point
+FFT, 13.2 % at 16384 and 17.5 % at 65536, rising to about **19 %** with noise
+reduction at full strength. The whole GUI — both plots, every axis, the controls
+and the waterfall at 1444 columns — costs **11.1 ms of CPU per frame**, against
+92.5 ms before the display path was reworked, which is 22.7 frames a second
+inside a 45 ms budget rather than 11.7. A fixed 6400-column waterfall costs
+13.5 ms, and the 65536-point FFT 12.8 ms.
 
 ## What the last audit found
 
 Every item below was reproduced first and re-measured afterwards.
 
+- **The waterfall drew every frequency to the left of where the axis said it
+  was.** Pooling bins into columns grouped the first `k·columns` of them and
+  dropped the remainder, then stretched what was left across a rectangle that
+  claimed the whole span.  With 16384 bins and a 1324 px plot that drew 97 % of
+  the span over 100 % of it, putting the middle of the band 20 px — some 30 kHz
+  at 2 MSps — to the left of its own pixel, and 57 kHz out at the window's
+  edge.  The bins are now shared out evenly among the columns
+  (`maximum.reduceat` over computed edges), so the last column is no wider than
+  the first and the picture lines up with the scale below it.  The spectrum
+  trace was pooled the same way and stopped 2.9 % short of the right-hand edge;
+  it reaches it now.
+- **The GUI could not keep up with its own repaint interval.** A repaint cost
+  92.5 ms of CPU against a 45 ms interval — 11.7 frames a second, with the paint
+  competing for the same four cores the DSP runs on.  Antialiasing was two
+  thirds of it (every line rasterised on the CPU, on a machine with integrated
+  graphics), a third level of grid ticks most of the rest.  The frame now costs
+  11.1 ms and the display holds 22.7 fps; the measurements and the reasoning are
+  under *How it works*.
 - **Both displays were permanently blank at 62.5 and 96 kSps.** A hop is sized
   for the demodulator, not for the FFT: at 62.5 kSps it holds 2500 IQ samples,
   fewer than one 4096-point transform, so `nseg` was always zero and no frame
@@ -399,9 +471,10 @@ WWV on 10.000 or 15.000 MHz (AM) to confirm the receiver works, or 20 m in
 daylight.
 
 **High CPU / drops in the status bar** — lower the sample rate (2 MSps is ample
-for HF), reduce the FFT size, leave the waterfall **Detail** on *Auto* (a fixed
-6400 columns repaints in about 4 ms against 2.5 ms), or raise the waterfall
-contrast so you can lower the display rate. Dropping samples is the designed
+for HF), reduce the FFT size (at 2 MSps that is 11.8 % of one core at 4096 and
+17.5 % at 65536), or leave the waterfall **Detail** on *Screen*, which is both
+the sharpest and the cheapest setting. A repaint costs 11.1 ms of CPU a frame at
+*Screen* and 13.5 ms with a fixed 6400 columns. Dropping samples is the designed
 response to a machine that is too busy; the receiver stays in the present
 rather than drifting behind.
 
@@ -410,10 +483,14 @@ tuning accepts any frequency, but the presets and band data are aimed at HF.
 
 ## Notes and limitations
 
-- The waterfall keeps 240 lines, and on *Auto* builds each line from as many
-  frequency columns as the spectrum is painted with (2048), up to a chosen
-  6400. Its colour range auto-tracks the noise floor with an adjustable
+- The waterfall holds one line per pixel of plot height (`WF_MIN_ROWS`..
+  `WF_MAX_ROWS` — 120 to 600), and on *Screen* builds each line from as many
+  frequency columns as the plot has pixels, up to 6400 if you ask for that
+  many. Its colour range auto-tracks the noise floor with an adjustable
   contrast (30 dB by default), or you can set the floor and ceiling by hand.
+  Its levels are baked into the pixels as each line is drawn, so history that
+  is already on screen keeps the levels it was drawn with until a control
+  changes — which is when the whole picture is rebuilt from the dB rows.
 - `WFM` broadcast FM is not implemented — the audio path is fixed at 48 kHz,
   which suits AM/SSB/CW/NFM but not 200 kHz-wide FM.
 - Ham band edges follow the IARU **Region 2** plan.

@@ -1,3 +1,39 @@
+rspsdr (1.0.1) unstable; urgency=medium
+
+  * Waterfall resolution reworked along SDR++'s lines.  The default detail
+    setting, "Screen", builds each line from as many columns as the plot has
+    pixels (SDR++'s dataWidth), so the picture is 1:1 with the display and
+    nothing is stretched; the history is one line per pixel of plot height;
+    and bins are reduced to columns by maximum (SDR++'s doZoom), so a carrier
+    that falls between two columns keeps its strength instead of being
+    averaged into the noise.  The FFT list now reaches 32768 and 65536 points.
+  * Fixed: the waterfall drew every frequency to the left of where the axis
+    said it was.  Pooling grouped the first k*columns bins and dropped the
+    remainder, then stretched what was left over the whole span -- 97% of the
+    span drawn into 100% of it, 20 px (30 kHz at 2 MSps) out in the middle of
+    the window and 57 kHz at its edge.  Bins are shared evenly among the
+    columns now, and the spectrum trace reaches the right-hand edge.
+  * Performance on a CPU-rendered display: a repaint of the window cost 92.5
+    ms against a 45 ms interval (11.7 fps); it costs 11.1 ms (22.7 fps) now.
+    The spectrum transform moved to scipy.fft (5.2 -> 2.1 ms for sixteen
+    16384-point transforms of complex64, and it keeps single precision),
+    antialiasing was turned off for the plots (81 -> 21 ms a frame; the
+    waterfall image asks for smooth scaling on its own), the grid draws two
+    levels of ticks instead of three (20.5 -> 14.4 ms), each plot is drawn
+    with one point per pixel, and the waterfall keeps its history as pixels as
+    well as dB rows so a frame colourises one row rather than the whole
+    picture (21 ms -> 0.1 ms), with a level or colour change rebuilding the
+    picture from the dB rows.
+  * Tests: the GUI suite checks that Screen equals the plot's pixel width and
+    follows a resize, that a lone carrier survives pooling, that drawn pixels
+    are the colour map's entry for the level behind them, that a cleared
+    history is black under a reversed palette, that the drawn carrier lands on
+    the pixel the axis names, and that a full repaint fits the repaint
+    interval; the unit suite pins the transform against a plain numpy
+    reference.
+
+ -- RockIslander <174265838+RockIslander@users.noreply.github.com>  Mon, 12 Oct 2026 15:36:51 -0230
+
 rspsdr (1.0.0) unstable; urgency=medium
 
   * Initial Debian package.
