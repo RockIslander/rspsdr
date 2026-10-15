@@ -317,10 +317,21 @@ check("the meter takes the calibration, the peak switch and the face",
       == (-60.5, False, "cream"),
       f"S9 at {win.smeter.ref_dbfs} dBFS, peak {win.smeter.peak_on}, "
       f"face {win.smeter.face}")
+# The window's own look: a colour scheme, and the controls under the picture
+# folded away to give the waterfall their height.
+win.cmb_theme.setCurrentIndex(win.cmb_theme.findData("amber"))
+win.settings_pane.set_folded(True)
+check("the scheme and the folded controls take effect at once",
+      (win.theme_name, win.settings_pane.is_folded(), win.theme["plot"])
+      == ("amber", True, ui_mod.theme.THEMES["amber"]["plot"]),
+      f"theme {win.theme_name} (plot {win.theme['plot']}), folded "
+      f"{win.settings_pane.is_folded()}, shortest height "
+      f"{win.minimumHeight()} px")
 # A size that fits the offscreen screen (800x800) and is above the window's
-# own minimum (780x560), so nothing but the remembered value is what is being
-# checked here.  _size_to_screen() and the screen clamp each have their own
-# check below.
+# own minimum -- which with the controls folded away is 780x560 again -- so
+# nothing but the remembered value is what is being checked here.
+# _size_to_screen(), the screen clamp and the floor the unfolded controls set
+# each have their own check below.
 win.split.setSizes([180, 460])     # the divider, dragged
 win.resize(790, 620)
 win.move(60, 40)
@@ -369,10 +380,10 @@ check("the window's own controls are in the file too",
       (ui["step"], ui["zoom"], ui["wf_auto"], ui["wf_floor"], ui["wf_ceiling"],
        ui["wf_contrast"], ui["wf_cmap"], ui["wf_reverse"], ui["wf_detail"],
        ui["ft8_band"], ui["ft8_every"], ui["s_meter_ref"],
-       ui["s_meter_peak"], ui["s_meter_face"],
-       ui["split_spectrum"], ui["split_waterfall"])
+       ui["s_meter_peak"], ui["s_meter_face"], ui["theme"],
+       ui["settings_folded"], ui["split_spectrum"], ui["split_waterfall"])
       == (10, 4, False, -115.0, -45.0, 52.0, "viridis", True, watch, "20m",
-          False, -60.5, False, "cream", split[0], split[1]),
+          False, -60.5, False, "cream", "amber", True, split[0], split[1]),
       json.dumps(ui))
 check("the window's own size and place are written down",
       (saved["window"]["x"], saved["window"]["y"], saved["window"]["w"],
@@ -423,6 +434,8 @@ restored = [
     ("the meter's S9 calibration", reopened.spn_sref.value(), -60.5),
     ("the meter's peak marker", reopened.chk_speak.isChecked(), False),
     ("the meter's face", reopened.cmb_sface.currentData(), "cream"),
+    ("the colour scheme", reopened.theme_name, "amber"),
+    ("the controls folded away", reopened.settings_pane.is_folded(), True),
 ]
 wrong = [f"{name} ({got!r} not {want!r})" for name, got, want in restored
          if got != want]
@@ -434,6 +447,25 @@ check("... and the meter itself is set up that way again, not just the boxes",
       == (-60.5, False, "cream"),
       f"S9 at {reopened.smeter.ref_dbfs} dBFS, peak {reopened.smeter.peak_on}, "
       f"face {reopened.smeter.face}")
+# Not just the box that says "amber": the scheme has to be on the window, and
+# folding has to have come back with it -- which is the difference between the
+# window opening small and opening with a floor to suit the controls it shows.
+check("... and the scheme is on the window, not only in its combo box",
+      reopened.theme["accent"] == ui_mod.theme.THEMES["amber"]["accent"]
+      and reopened.spectrum.backgroundBrush().color().name()
+      == ui_mod.theme.THEMES["amber"]["plot"]
+      and reopened.waterfall.backgroundBrush().color().name()
+      == ui_mod.theme.THEMES["amber"]["plot"],
+      f"{reopened.theme_name}: trace "
+      f"{ui_mod.theme.THEMES['amber']['accent']}, plot "
+      f"{reopened.spectrum.backgroundBrush().color().name()}")
+check("... and folding came back with it, so the window may be small again",
+      reopened.settings_pane.is_folded()
+      and not reopened.settings_pane.body.isVisible()
+      and reopened.minimumHeight() == ui_mod.FOLDED_MIN_HEIGHT,
+      f"folded {reopened.settings_pane.is_folded()}, shortest height "
+      f"{reopened.minimumHeight()} px (folded floor "
+      f"{ui_mod.FOLDED_MIN_HEIGHT})")
 # The calibration is the whole of the meter's absolute accuracy, so the check
 # is the one that matters: the level it was calibrated at must come back as S9.
 reopened.smeter.feed(-60.5, 0.045)
@@ -484,13 +516,15 @@ w = prefs.PrefsStore(wild)
 w.put("window", "x", 30_000)
 w.put("window", "y", 30_000)
 w.put("window", "w", 790)
-w.put("window", "h", 600)
+# The unfolded window's floor is 659 px at this width, and a size the window
+# will not take is not one it can come back to.
+w.put("window", "h", 700)
 w.save()
 off = window(Settings(), store=w)
 check("a remembered position that is off every screen is ignored",
       off.x() < 20_000 and off.y() < 20_000, f"{off.x()},{off.y()}")
 check("... but the size, which is the window's own, is still used",
-      (off.width(), off.height()) == (790, 600),
+      (off.width(), off.height()) == (790, 700),
       f"{off.width()}x{off.height()}")
 off.close()
 
@@ -514,7 +548,9 @@ mx = prefs.PrefsStore(tmp_path("max.json"))
 mx.put("window", "x", 60)
 mx.put("window", "y", 40)
 mx.put("window", "w", 790)
-mx.put("window", "h", 620)
+# Above the floor the unfolded controls set at this width (659 px): a size the
+# window will not take is not one it can come back to.
+mx.put("window", "h", 700)
 mx.put("window", "maximised", True)
 mx.save()
 big = window(Settings(), store=mx)
@@ -525,13 +561,14 @@ check("a window that was left maximised comes back maximised", big.isMaximized()
 big.close()
 again_w = json.load(open(tmp_path("max.json")))["window"]
 check("... and the size to un-maximise to is still the one the user chose",
-      (again_w["w"], again_w["h"], again_w["maximised"]) == (790, 620, True),
+      (again_w["w"], again_w["h"], again_w["maximised"]) == (790, 700, True),
       json.dumps(again_w))
 plain_w = window(Settings(), store=w)
 plain_w.show()
 app.processEvents()
 check("a window that was left normal does not come back maximised",
-      not plain_w.isMaximized() and (plain_w.width(), plain_w.height()) == (790, 600),
+      not plain_w.isMaximized()
+      and (plain_w.width(), plain_w.height()) == (790, 700),
       f"maximised={plain_w.isMaximized()} {plain_w.width()}x{plain_w.height()}")
 plain_w.close()
 

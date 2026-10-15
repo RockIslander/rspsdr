@@ -56,6 +56,20 @@ def check(name, ok, detail=""):
         FAILURES.append(name)
 
 
+def inside_window(widget, win) -> bool:
+    """Is the widget inside the window's client area?
+
+    Qt's ``isVisible()`` means "not hidden", not "on the screen": a row clipped
+    off the bottom of a too-short window is still visible, and a control nobody
+    can see is worse than one that is disabled.  Geometry in window coordinates
+    is what says whether a user can actually reach it.
+    """
+    top_left = widget.mapTo(win, QPoint(0, 0))
+    return (0 <= top_left.x() and 0 <= top_left.y()
+            and top_left.x() + widget.width() <= win.width()
+            and top_left.y() + widget.height() <= win.height())
+
+
 def cpu_jiffies() -> tuple[int, int] | None:
     """(total, idle) jiffies from /proc/stat -- idle counts iowait too."""
     try:
@@ -534,10 +548,8 @@ def main() -> int:
             for name, wdg in (("+", win.btn_zoom_in), ("-", win.btn_zoom_out),
                               ("Fit", win.btn_zoom_fit), ("readout", win.lbl_zoom),
                               ("Detail", win.cmb_wfdetail)):
-                tl = wdg.mapTo(win, QPoint(0, 0))
-                if not (0 <= tl.x() and 0 <= tl.y()
-                        and tl.x() + wdg.width() <= win.width()
-                        and tl.y() + wdg.height() <= win.height()):
+                if not inside_window(wdg, win):
+                    tl = wdg.mapTo(win, QPoint(0, 0))
                     clipped.append(f"{name} at +{tl.x()}+{tl.y()} in "
                                    f"{win.width()}x{win.height()}")
         win.resize(was)
@@ -547,9 +559,156 @@ def main() -> int:
               and win.btn_zoom_fit.isEnabled(),
               ", ".join(clipped) or
               f"+ / - / Fit inside the window at {was.width()}x{was.height()} "
-              f"and at 780x560, readout “{win.lbl_zoom.text()}”")
+              f"and at its smallest, readout “{win.lbl_zoom.text()}”")
         check("the zoom readout states the visible width",
               win.lbl_zoom.text() == f"{span/1e6:g} MHz", win.lbl_zoom.text())
+
+        # ---- the controls below the picture fold away -------------------
+        # The pane exists for height: folding it hands the rows' height to the
+        # plots.  That is what is checked -- not that a button toggles, but
+        # that the picture grows by what the controls gave up.
+        from rspsdr import theme as theme_mod
+        pane = win.settings_pane
+
+        def settle(times: int = 3):
+            """Let the layout settle.  Hiding a row re-lays out the window on
+            its next pass, so one processEvents() is not always enough for the
+            geometry to have followed -- an activated layout is."""
+            for _ in range(times):
+                QApplication.processEvents()
+                win.centralWidget().layout().activate()
+
+        pane.set_folded(False)
+        win.resize(was)
+        settle()
+        tucked = [win.cmb_theme, win.cmb_rf, win.cmb_wfdetail, win.spn_sref,
+                  win.btn_zoom_fit]
+        check("the controls under the picture are in one pane that can fold",
+              len(pane.rows()) == 3
+              and all(pane.body.isAncestorOf(w) for w in tucked)
+              and not pane.body.isAncestorOf(win.ft8_panel)
+              and not pane.is_folded() and pane.body.isVisible(),
+              f"{len(pane.rows())} rows (look, rf, waterfall), "
+              f"{sum(1 for w in tucked if pane.body.isAncestorOf(w))} controls "
+              "inside, FT8 strip outside")
+
+        pane_before, wf_before = pane.height(), win.waterfall.height()
+        spect_before = win.spectrum.height()
+        rows_before = win.waterfall.rows()
+        pane_top_before = pane.mapTo(win, QPoint(0, 0)).y()
+        picture_top = win.split.mapTo(win, QPoint(0, 0)).y()
+        pane.btn_fold.click()
+        settle()
+        gave_up = pane_before - pane.height()
+        check("folding the pane gives its height to the waterfall",
+              pane.is_folded() and not pane.body.isVisible()
+              and gave_up > 20
+              and win.waterfall.height() > wf_before + 20
+              and win.waterfall.rows() > rows_before
+              and (win.spectrum.height() + win.waterfall.height())
+              >= (spect_before + wf_before) + gave_up - 4
+              and win.split.mapTo(win, QPoint(0, 0)).y() == picture_top
+              and pane.mapTo(win, QPoint(0, 0)).y()
+              >= pane_top_before + gave_up - 4,
+              f"pane {pane_before} -> {pane.height()} px (gave up {gave_up}), "
+              f"picture {spect_before}+{wf_before} -> {win.spectrum.height()}+"
+              f"{win.waterfall.height()} px, history {rows_before} -> "
+              f"{win.waterfall.rows()} rows, its top {picture_top} -> "
+              f"{win.split.mapTo(win, QPoint(0, 0)).y()}")
+        check("and the button that folded it is still there",
+              pane.btn_fold.isVisible() and inside_window(pane.btn_fold, win),
+              f"fold button {pane.btn_fold.text()!r} at "
+              f"+{pane.btn_fold.mapTo(win, QPoint(0, 0)).x()}"
+              f"+{pane.btn_fold.mapTo(win, QPoint(0, 0)).y()} in "
+              f"{win.width()}x{win.height()}")
+
+        # The shortcut is how it is meant to be used: the hand does not have to
+        # travel down to that row to make the picture bigger.
+        from PyQt6.QtGui import QKeyEvent
+        app.sendEvent(win, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_H,
+                                     Qt.KeyboardModifier.ControlModifier, "h"))
+        settle()
+        check("Ctrl+H unfolds them again",
+              not pane.is_folded() and pane.body.isVisible(),
+              f"folded {pane.is_folded()} after Ctrl+H; the button says "
+              f"{pane.btn_fold.text()!r}")
+
+        # A window showing the rows cannot be shorter than they are: Qt would
+        # otherwise squeeze the picture down to nothing and cut the rows off at
+        # the bottom edge, where nothing says they are there at all.
+        win.resize(780, 560)
+        settle()
+        open_floor = win.height()
+        out_of_reach = [name for name, wdg in (("zoom +", win.btn_zoom_in),
+                                               ("zoom Fit", win.btn_zoom_fit),
+                                               ("Detail", win.cmb_wfdetail),
+                                               ("Theme", win.cmb_theme),
+                                               ("S9 at", win.spn_sref))
+                        if not inside_window(wdg, win)]
+        pane.set_folded(True)
+        settle()
+        folded_at = win.height()
+        win.resize(780, 560)
+        settle()
+        folded_floor = win.height()
+        check("the window will not shrink past the controls it is showing",
+              folded_floor == 560 and open_floor > folded_floor
+              and not out_of_reach and win.height() >= win.minimumHeight(),
+              f"unfolded {open_floor} px, folded {folded_floor} px "
+              f"(was {folded_at}), floor {win.minimumHeight()} px; out of "
+              f"reach: {', '.join(out_of_reach) or 'none'}")
+        pane.set_folded(False)
+        win.resize(was)
+        settle()
+
+        # ---- the colour schemes ---------------------------------------
+        win.cmb_theme.setCurrentIndex(win.cmb_theme.findData(theme_mod.DEFAULT))
+        settle(1)
+
+        def _scheme_summary(name: str) -> str:
+            """One scheme, for the message: its name, trace and plot colour."""
+            pal = theme_mod.palette(name)
+            return f"{theme_mod.label(name)}: {pal['accent']} on {pal['plot']}"
+
+        bad_scheme = []
+        for name in theme_mod.names():
+            win.cmb_theme.setCurrentIndex(win.cmb_theme.findData(name))
+            settle(1)
+            pal = theme_mod.palette(name)
+            sheet = app.styleSheet()
+            trace = win.spectrum.curve.opts.get("pen").color().name()
+            plot = win.spectrum.backgroundBrush().color().name()
+            below = win.waterfall.backgroundBrush().color().name()
+            if (win.theme_name != name
+                    or trace != pal["accent"] or plot != pal["plot"]
+                    or below != pal["plot"]
+                    or win.lbl_band.styleSheet() != f"color:{pal['accent']}"
+                    or win.lbl_device.styleSheet() != f"color:{pal['muted']}"
+                    or pal["border"] not in sheet
+                    or pal["highlight"] not in sheet):
+                bad_scheme.append(
+                    f"{name}: {win.theme_name}, trace {trace}, plot {plot}")
+        check(f"all {len(theme_mod.names())} schemes reach the plots and "
+              "the labels",
+              not bad_scheme, "; ".join(bad_scheme) or
+              ", ".join(_scheme_summary(n) for n in theme_mod.names()))
+        check("and the list offers exactly the schemes there are",
+              win.cmb_theme.count() == len(theme_mod.names())
+              and [win.cmb_theme.itemData(i)
+                   for i in range(win.cmb_theme.count())]
+              == list(theme_mod.names()),
+              ", ".join(win.cmb_theme.itemText(i)
+                        for i in range(win.cmb_theme.count())))
+        # Back to the default, so that the rest of the run -- and the picture
+        # it saves at the end -- is in the scheme a fresh install opens in.
+        win.cmb_theme.setCurrentIndex(win.cmb_theme.findData(theme_mod.DEFAULT))
+        settle(1)
+        check("and going back leaves the window as it started",
+              win.theme_name == theme_mod.DEFAULT
+              and win.spectrum.backgroundBrush().color().name()
+              == theme_mod.palette(theme_mod.DEFAULT)["plot"],
+              f"{win.theme_name}, plot "
+              f"{win.spectrum.backgroundBrush().color().name()}")
 
         win.btn_zoom_in.click()
         check("the Zoom + button magnifies",
@@ -887,6 +1046,49 @@ def main() -> int:
                   abs(left - want_l) <= 1.5 and abs(right - want_r) <= 1.5,
                   f"{win.waterfall.cols()} columns drawn over {left:.0f}..{right:.0f} px, "
                   f"the axis puts that window at {want_l:.0f}..{want_r:.0f} px")
+
+        # ---- how deep the zoom goes --------------------------------------
+        # The ladder is arithmetic rather than taste: the window is the
+        # receiver span divided by the zoom and the FFT divides that span into
+        # bins, so the bins left across the window are n_fft / zoom.  At the
+        # smallest transform the window offers and the deepest step there must
+        # still be several of them -- a window one bin wide is a single column
+        # stretched across the whole plot, which looks like a signal and is
+        # not one.
+        ladder = [int(win.cmb_zoom.itemData(i))
+                  for i in range(win.cmb_zoom.count())]
+        check("the zoom ladder is ordered, starts at 1x and goes deep",
+              ladder == sorted(set(ladder)) and ladder[0] == 1
+              and max(ladder) == ui.ZOOM_MAX and ui.ZOOM_MAX >= 256,
+              " ".join(f"{step}x" for step in ladder))
+
+        # Walked on a copy of the state the checks below rely on: they go on to
+        # ask what a *zoom of 4x* is showing, so both controls are put back.
+        was_zoom = int(win.cmb_zoom.currentData())
+        was_detail = int(win.cmb_wfdetail.currentData())
+        win.cmb_wfdetail.setCurrentIndex(detail_index(ui.SCREEN_DETAIL))
+        smallest = min(int(win.cmb_fft.itemData(i))
+                       for i in range(win.cmb_fft.count()))
+        bins_at: dict[int, int] = {}
+        for step in ladder:
+            win.cmb_zoom.setCurrentIndex(win.cmb_zoom.findData(step))
+            QApplication.processEvents()
+            lo, hi = win._view(live, span)
+            win.waterfall.push(live, np.full(smallest, -90.0, np.float32),
+                               span, lo, hi)
+            bins_at[step] = win.waterfall.bins()
+        deepest = max(ladder)
+        win.cmb_zoom.setCurrentIndex(win.cmb_zoom.findData(was_zoom))
+        win.cmb_wfdetail.setCurrentIndex(detail_index(was_detail))
+        win.waterfall.clear_history()
+        QApplication.processEvents()
+        check("and the deepest step still has bins to draw at the smallest FFT",
+              all(bins_at[step] == smallest // step for step in ladder)
+              and min(bins_at.values()) >= 4,
+              f"{smallest}-point transform: "
+              + ", ".join(f"{step}x {bins_at[step]} bins"
+                          for step in ladder[-4:])
+              + f" -- {span / deepest:.0f} Hz across the window at {deepest}x")
 
         # ---- a drag follows the pointer, and the window stays put ---------
         # The other half of the same complaint.  A recentre mid-gesture moved
@@ -1514,6 +1716,25 @@ def main() -> int:
               win.smeter.isVisible() and win.smeter.width() == ui.smeter.WIDTH
               and win.smeter.height() == ui.smeter.HEIGHT,
               f"{win.smeter.width()}x{win.smeter.height()} px")
+        # Where it is, as geometry: the top right of the display, above the
+        # waterfall -- and above the spectrum, which is above the waterfall.
+        # That placement is the whole of the change, so it is checked as
+        # positions rather than as membership of some row.
+        meter_at = win.smeter.mapTo(win, QPoint(0, 0))
+        spectrum_at = win.spectrum.mapTo(win, QPoint(0, 0))
+        check("the meter is the top right corner, above the waterfall",
+              meter_at.y() + win.smeter.height() <= spectrum_at.y()
+              and meter_at.x() > win.width() // 2
+              and meter_at.x() + win.smeter.width() >= win.width() - 16,
+              f"meter +{meter_at.x()}+{meter_at.y()} "
+              f"{win.smeter.width()}x{win.smeter.height()} in "
+              f"{win.width()}x{win.height()}, spectrum starts at y "
+              f"{spectrum_at.y()}")
+        check("and is no longer buried in the gain row",
+              not win.settings_pane.body.isAncestorOf(win.smeter)
+              and win.settings_pane.body.isAncestorOf(win.spn_sref),
+              "the meter is out of the rows; its calibration stayed with the "
+              "settings")
 
         # Through the controls, not the methods behind them: the calibration,
         # the peak switch and the face all have to reach the widget.

@@ -733,6 +733,184 @@ check("and it always holds the highest level of the last half second",
       f"peak {ball.peak:.1f} dBm against {min(levels[-11:]):.1f}.."
       f"{max(levels[-11:]):.1f} in the last 0.5 s")
 
+# ------------------------------------------------------------- themes
+# A colour scheme is a table and a style sheet built from it, with nothing of
+# Qt in either (see rspsdr/theme.py), so what can be checked here is what
+# matters about the table: that every scheme is complete, that every colour
+# parses, and that every scheme is *readable* -- the text against the window,
+# and the trace against the plot it is drawn on.  A scheme that cannot be read
+# is a bug the eye catches slowly and a number catches at once.
+print("\n== window themes ==")
+from rspsdr import theme  # noqa: E402
+
+
+def _luminance(colour: str) -> float:
+    """Relative luminance, as WCAG defines it (sRGB, linearised)."""
+    parts = []
+    for value in theme.rgb(colour):
+        u = value / 255.0
+        parts.append(u / 12.92 if u <= 0.03928
+                     else ((u + 0.055) / 1.055) ** 2.4)
+    return 0.2126 * parts[0] + 0.7152 * parts[1] + 0.0722 * parts[2]
+
+
+def _contrast(a: str, b: str) -> float:
+    """How many times brighter one colour is than the other, +1 either way."""
+    la, lb = _luminance(a), _luminance(b)
+    return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+
+
+check("there is more than one scheme, and the default is one of them",
+      len(theme.names()) >= 3 and theme.DEFAULT in theme.names(),
+      theme.describe())
+check("every scheme is offered once and has a name to show",
+      len(set(theme.names())) == len(theme.names())
+      and all(theme.label(n) and theme.note(n) for n in theme.names()),
+      ", ".join(f"{theme.label(n)} ({theme.note(n)})" for n in theme.names()))
+
+incomplete = []
+bad_colour = []
+for _name in theme.names():
+    _pal = theme.palette(_name)
+    for _key in theme.KEYS:
+        if _key not in _pal:
+            incomplete.append(f"{_name}.{_key}")
+    for _key in theme.KEYS:
+        _value = _pal.get(_key)
+        if _key == "grid_alpha":
+            if not (isinstance(_value, float) and 0.0 < _value <= 1.0):
+                bad_colour.append(f"{_name}.{_key}={_value!r}")
+            continue
+        if not (isinstance(_value, str) and len(_value) == 7
+                and _value.startswith("#")):
+            bad_colour.append(f"{_name}.{_key}={_value!r}")
+            continue
+        try:
+            if len(theme.rgb(_value)) != 3:
+                bad_colour.append(f"{_name}.{_key}={_value!r}")
+        except ValueError:
+            bad_colour.append(f"{_name}.{_key}={_value!r}")
+check(f"every scheme sets all {len(theme.KEYS)} fields",
+      not incomplete, ", ".join(incomplete[:6]) or
+      " ".join(theme.KEYS))
+check("and every colour in it is a #rrggbb that parses",
+      not bad_colour, ", ".join(bad_colour[:6]))
+check("an unknown scheme is the default rather than an error",
+      theme.palette("no-such-theme") == theme.palette(theme.DEFAULT),
+      f"{theme.label('no-such-theme')} -- "
+      f"{theme.note('no-such-theme') or 'no note'}")
+check("and the default scheme is what the window actually paints",
+      theme.palette(theme.DEFAULT)["plot"]
+      == theme.THEMES[theme.DEFAULT]["plot"],
+      theme.palette(theme.DEFAULT)["plot"])
+
+# The floors are readability, not taste: 7:1 is WCAG's AAA body text, 4.5:1
+# its AA, and 3:1 the least that a large mark may be seen at all.  Every
+# scheme clears them, and a scheme added later has to as well.
+READABILITY = {
+    ("text", "window"): (7.0, "ordinary text on the window"),
+    ("bright", "window"): (7.0, "the application's name"),
+    ("muted", "window"): (3.0, "the secondary readouts"),
+    ("text", "field"): (7.0, "text inside an input"),
+    ("text", "panel"): (7.0, "text on a raised panel"),
+    ("accent", "plot"): (4.5, "the spectrum trace"),
+    ("peak", "plot"): (3.0, "the peak-hold trace"),
+    ("marker", "plot"): (3.0, "the tuning marker"),
+    ("band", "plot"): (2.0, "the passband wash"),
+    ("grid", "plot"): (1.2, "the grid (visible, but not the subject)"),
+    ("highlight_text", "highlight"): (4.5, "selected text"),
+}
+faint = []
+muted_grid = []
+for _name in theme.names():
+    _pal = theme.palette(_name)
+    for (_a, _b), (_floor, _what) in READABILITY.items():
+        _got = _contrast(_pal[_a], _pal[_b])
+        if _got < _floor:
+            faint.append(f"{_name}: {_what} {_got:.2f}:1 < {_floor}")
+    # A grid that shouts louder than the trace it is drawn under is worse than
+    # no grid: this is the one relationship between two contrasts that has to
+    # hold the right way round, not just above a floor.
+    if _contrast(_pal["grid"], _pal["plot"]) >= _contrast(_pal["accent"],
+                                                          _pal["plot"]):
+        muted_grid.append(_name)
+check("every scheme is readable: text, trace, marker and grid",
+      not faint, "; ".join(faint) or
+      f"{len(theme.names())} schemes x {len(READABILITY)} pairings")
+def _pairing(name: str) -> str:
+    """How one scheme's grid compares with its own trace, for the report."""
+    pal = theme.palette(name)
+    return (f"{_contrast(pal['grid'], pal['plot']):.2f}"
+            f"<{_contrast(pal['accent'], pal['plot']):.2f}")
+
+
+check("and no scheme draws its grid louder than its trace",
+      not muted_grid, ", ".join(muted_grid) or
+      " ".join(f"{name} {_pairing(name)}" for name in theme.names()))
+
+# The controls are styled from these; the rest of a scheme is painted by the
+# window itself (the plots' pens, the passband wash, the buttons that carry a
+# meaning), so a scheme colour is not required to appear in the style sheet.
+SHEET_KEYS = ("window", "panel", "field", "text", "muted", "bright",
+              "accent", "border", "highlight", "highlight_text")
+sheets = {name: theme.stylesheet(theme.palette(name)) for name in theme.names()}
+check("the style sheet built for every scheme is balanced and non-trivial",
+      all(s.count("{") == s.count("}") and len(s) > 500
+          for s in sheets.values()),
+      ", ".join(f"{n} {len(s)} chars / {s.count('{')} blocks"
+                for n, s in sheets.items()))
+check("and it names every colour the controls are styled with",
+      all(all(str(theme.palette(name)[k]) in sheet for k in SHEET_KEYS)
+          for name, sheet in sheets.items()),
+      f"{len(SHEET_KEYS)} colours in each of {len(sheets)} sheets, "
+      f"{len(next(iter(sheets.values())))} chars each")
+check("with nothing left unfilled in it",
+      all("None" not in s and "{{" not in s and "}}" not in s
+          for s in sheets.values()),
+      f"no unfilled values, no doubled braces, in {len(sheets)} sheets")
+check("the style sheet never styles a bare QWidget",
+      all("QWidget {" not in sheet and "QWidget{" not in sheet
+          for sheet in sheets.values()),
+      "a blanket rule reaches the plots and paints over their own background")
+check("two schemes are actually different from each other",
+      len({tuple(sorted(theme.palette(n).items())) for n in theme.names()})
+      == len(theme.names()),
+      ", ".join(f"{n}={theme.palette(n)['plot']}" for n in theme.names()))
+check("rgb() turns a colour into the three bytes Qt wants",
+      theme.rgb("#7fe7ff") == (0x7f, 0xe7, 0xff)
+      and theme.rgb("000000") == (0, 0, 0),
+      f"{theme.rgb('#7fe7ff')}, {theme.rgb('000000')}")
+
+# -------------------------------------------------------------- zoom ladder
+# The zoom ladder and the FFT list are tied together by arithmetic: the window
+# on show is the receiver span divided by the zoom, the FFT divides that span
+# into bins, so the bins left across the window are the FFT size divided by the
+# zoom.  Keep the deepest step four bins wide at the smallest transform and the
+# picture is never a single column stretched across the plot -- which looks like
+# a signal and is not one.  Both tables live in rspsdr/ui.py, which imports Qt;
+# importing it needs no display, and none of the numbers below do.
+print("\n== zoom ladder ==")
+from rspsdr import ui  # noqa: E402
+
+steps = [int(val) for _, val in ui.ZOOMS]
+check("the zoom ladder is a run of doubling steps from 1x",
+      steps[0] == 1 and steps == [2 ** i for i in range(len(steps))]
+      and ui.ZOOM_MAX == steps[-1],
+      f"{len(steps)} steps, 1x to {ui.ZOOM_MAX}x")
+check("the deepest step still has bins to draw at the smallest FFT",
+      ui.FFTS[0] // ui.ZOOM_MAX >= 4,
+      f"{ui.FFTS[0]} bins over {ui.ZOOM_MAX}x = "
+      f"{ui.FFTS[0] / ui.ZOOM_MAX:.0f} bins across the window")
+# The readout names the window in Hz, kHz or MHz.  At the lowest sample rate on
+# offer the deepest step still has to be a real width rather than "0 Hz".
+lowest_rate = min(rate for _, rate in ui.RATES)
+highest_rate = max(rate for _, rate in ui.RATES)
+check("and the window is still a real width at the lowest sample rate",
+      lowest_rate / ui.ZOOM_MAX >= 1.0,
+      f"{lowest_rate/1e3:g} kSps at {ui.ZOOM_MAX}x = "
+      f"{lowest_rate/ui.ZOOM_MAX:.0f} Hz, "
+      f"{highest_rate/ui.ZOOM_MAX/1e3:.1f} kHz at {highest_rate/1e6:g} MSps")
+
 # ---------------------------------------------------------------- band plan
 print("\n== band plan ==")
 check("formatted like a dial readout", bands.format_hz(14_070_000) == "14.070.000",

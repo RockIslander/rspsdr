@@ -1,3 +1,81 @@
+rspsdr (1.4.0) unstable; urgency=medium
+
+  * Five colour schemes for the window, chosen from a Theme list and
+    remembered: Night (the default -- the near-black blue with a cyan trace the
+    window has always had), Amber (a valve set: black dial, amber markings),
+    Phosphor (green cathode-ray glow), Slate (neutral grey with one soft blue
+    accent) and Daylight, which is light, for a bright room or a projector.
+    One table in rspsdr/theme.py sets the palette, the controls, the plots'
+    backgrounds and pens, the grid and the passband wash, plus the labels that
+    used to carry a hex value of their own, so a scheme is a name rather than a
+    dozen colours scattered through two files.  --theme NAME opens in one
+    without touching what is remembered; --check names them and says which the
+    window would open in.
+  * The schemes are checked for readability rather than left to the eye: the
+    unit suite computes WCAG contrast ratios and requires ordinary text at
+    7:1 against the window, the spectrum trace at 4.5:1 against the plot it is
+    drawn on, the marker, the peak trace, the passband wash and the grid above
+    floors of their own -- and the grid quieter than the trace in every one of
+    them.  A scheme that cannot be read now fails the run.
+  * The signal meter has moved to the top right of the display area, in the row
+    above the picture, with the same reading in figures printed beside it.  It
+    was in the gain row, among a dozen boxes, where the one instrument in the
+    window meant to be read at a glance was the hardest thing to find; it is
+    now where a transceiver puts it.  Its own setup -- the S9 calibration, the
+    peak marker and the face -- moved down with the rest of the settings.
+  * Everything below the picture -- theme, meter setup, gains, FFT size,
+    waterfall levels, colour, detail and zoom -- is now one pane that folds
+    away (the button at its top left, or Ctrl+H), and folding hands the rows'
+    height to the picture: at 1360x739 the two plots go from 275 px together to
+    369, so the waterfall gains 94 px of screen it did not have.  The state is
+    remembered, so a window left folded opens folded.
+  * The window's shortest height now follows what it is showing.  With the
+    pane folded it can be 780x560 as before; with the rows on show it refuses
+    to be shorter than they are (659 px at the narrowest width), because Qt
+    would otherwise squeeze the picture to nothing and then cut the rows off at
+    the bottom edge -- measured before the fix: the +/-/Fit zoom buttons 18 px
+    below the bottom of the window, visible according to Qt and reachable
+    according to nobody.
+  * tests/test_units.py: every scheme complete, every colour a #rrggbb that
+    parses, the readability ratios above, and the style sheet built from each
+    one balanced, fully filled in, naming every colour the controls use, and
+    never styling a bare QWidget (such a rule reaches the plots and paints over
+    their own background).
+  * tests/test_prefs.py: the colour scheme and the folded state are written to
+    settings.json and come back -- with the scheme on the plots rather than
+    only in the combo box that names it, and a folded window opening folded and
+    small again.  Twenty-five controls now round-trip.
+  * tests/gui_smoke.py: the meter's placement is checked as geometry (top
+    right, above the spectrum and so above the waterfall); the rows below the
+    picture are one pane whose folding really does give its height to the
+    picture (the pane shrinks, the plots grow by what it gave up, the top of
+    the picture does not move, the waterfall's history gains rows), the fold
+    button stays on screen when everything else is put away, Ctrl+H does the
+    same, and the window will not shrink past the rows it is showing while the
+    folded window still reaches 780x560.  Every scheme is walked and required
+    to reach the plots, the stroked labels and the application's style sheet.
+  * The zoom ladder runs to 256x instead of 16x -- nine doubling steps, and at
+    2 MSps a 7.8 kHz window (244 Hz at the lowest sample rate) where the old
+    top of the ladder showed 125 kHz.  It stops where the arithmetic stops: the
+    window is the receiver span divided by the zoom, the FFT divides that span
+    into bins, so the bins across the window are the FFT size divided by the
+    zoom, and at the smallest transform on offer (1024 points) the deepest step
+    still has four of them.  The width readout follows the ladder down -- Hz,
+    kHz or MHz -- because "0 kHz" would have called a 244 Hz window nothing,
+    and the +/- buttons say when the ladder has ended instead of looking broken.
+  * tests/gui_smoke.py: the ladder is walked end to end against the smallest
+    FFT, requiring each step to halve the window, the bins across it to be the
+    FFT size over the zoom, and the deepest step to still have bins to draw.
+  * tests/test_units.py: the ladder and the FFT list are checked against each
+    other -- doubling steps from 1x, the deepest step four bins wide at the
+    smallest transform on offer, and the window still a real width at the
+    lowest sample rate, so the readout cannot come out as "0 Hz".
+  * README: the schemes, what folding the controls away buys, why the
+    window's floor depends on what it is showing, and where the zoom ladder
+    stops.
+
+ -- RockIslander <174265838+RockIslander@users.noreply.github.com>  Wed, 14 Oct 2026 20:55:00 -0230
+
 rspsdr (1.3.0) unstable; urgency=medium
 
   * An analogue signal meter, drawn to look like the S-meter of an Icom HF

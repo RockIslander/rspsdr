@@ -152,15 +152,21 @@ floor off the bottom of the waterfall. **RF gain** (0–3) trades sensitivity fo
 overload immunity. **Tuner BW** sets the analogue filter; *Auto* tracks the
 sample rate.
 
-**The signal meter** — the analogue S-meter beside the gain controls: a needle
-over a printed dial, S1 to S9 and then +20/+40/+60 dB, drawn either in the dark
-face of the later radios or the cream one of the older analogue sets (**Face**).
+**The signal meter** — the analogue S-meter in the top right corner, above the
+picture: a needle over a printed dial, S1 to S9 and then +20/+40/+60 dB, drawn
+either in the dark face of the later radios or the cream one of the older
+analogue sets (**Face**). It sits in the corner of the display because it is the
+one instrument here meant to be read at a glance rather than looked at, which is
+where a transceiver puts it too; the same reading in figures is printed beside
+it for the moments when the needle is between two marks, and its own controls —
+the calibration, the peak marker and the face — are with the rest of the
+settings below the picture.
 The scale is the IARU recommendation — S9 is −73 dBm, i.e. 50 µV into 50 Ω at
 the antenna socket, and each S unit below it is 6 dB — and the needle has the
 recommended quasi-peak ballistics: up in about 10 ms, down with a 500 ms time
 constant, with a **Peak** marker holding the highest level for half a second so
 a signal that comes and goes between two repaints is not missed. The exact
-figure is printed along the foot of the face as well ("S9 +20 dB   −53 dBm
+figure is printed beside the face as well ("S9 +20 dB   −53 dBm
 −25.0 dBFS"), because a needle can only be read to its own marks.
 
 It measures the level *inside the filter you are listening to*, taken before the
@@ -188,6 +194,29 @@ says it is, set
 headless report prints. Switching the receiver off drops the needle
 back to its rest rather than leaving it standing at the last signal, so a frozen
 reading can never be mistaken for a station still being heard.
+
+**The look of the window** — five colour schemes (**Theme**): *Night*, the
+default, is the near-black blue with a cyan trace the window has always had;
+*Amber* is a valve set, a black dial with amber markings; *Phosphor* is green
+cathode-ray glow; *Slate* is neutral grey with one soft blue accent; and
+*Daylight* is light, for a bright room, a laptop outdoors or a projector. One
+table sets the palette, the controls, the plots' own backgrounds and pens, the
+grid and the passband wash, so a scheme is a name rather than a dozen hex values
+scattered through two files. `--theme` opens in one without waiting to be
+chosen, and the one you last chose is remembered.
+
+**The controls fold away.** Everything below the picture — the look, the gains,
+the FFT, the waterfall's levels, colour, detail and zoom — is one pane with a
+**▾ Settings** button at its top left. Folding it (the button, or `Ctrl+H`)
+hides those rows and hands their height to the picture: at 1360x739 the two
+plots go from 275 px together to 369, which is 94 px of waterfall that was not
+on screen before. The state is remembered with everything else, so a window left
+with the controls put away opens that way. While they *are* on show the window
+will not be made shorter than they are — at its narrowest the floor is around
+660 px — because Qt would otherwise squeeze the picture to nothing and then cut
+the rows off at the bottom edge, with nothing on screen to say that the zoom
+buttons were down there. Fold the pane and the window can be 780x560 again,
+which is what makes the whole thing usable on a small screen.
 
 **Audio** — volume, mute, an audio AGC (worth leaving on for shortwave), and a
 squelch in dB.
@@ -238,7 +267,8 @@ works as a receiver and says what is missing rather than failing every slot; the
 it — the frequency, mode and filter, the CW pitch, the gains, the volume, the
 noise reduction and how hard it works, the squelch, the FFT size, the tuning
 step, the zoom, the waterfall's colours, levels and detail, the meter's S9
-calibration, its peak marker and which face it is drawn with, the FT8 band and
+calibration, its peak marker and which face it is drawn with, the colour scheme,
+whether the controls below the picture are folded away, the FT8 band and
 whether it decodes every slot — and read back the next time the window opens,
 along with the window's own size, place and maximised state and the divider
 between the two plots. A window that was maximised comes back maximised, and
@@ -310,15 +340,23 @@ measured here, sixteen 16384-point transforms of complex64 take 2.1 ms where
 4096, 13.2 % at 16384 and 17.5 % at 65536.
 
 **Zoom** magnifies both plots about the receiver centre: 1x shows the whole
-receiver span, 16x narrows it to a 125 kHz window at 2 MSps. Use the **-** and
-**+** buttons to step up and down, **Fit** to go back to the whole span, the
-**Zoom** list to jump straight to a setting, or the mouse wheel over the
-waterfall. The label beside them shows the width you are looking at ("500 kHz"),
-so it is clear what a click did. The plots are redrawn from the real spectrum at
-full resolution rather than a stretched copy, so zooming in reveals narrow
-carriers instead of blurring them. Retuning while zoomed brings the new
-frequency into view instead of leaving it off-screen, and changing the zoom
-blanks the waterfall history — rows already on screen were pooled for a
+receiver span, and 256x narrows it to a 7.8 kHz window at 2 MSps — 244 Hz at the
+lowest sample rate — in nine doubling steps. Use the **-** and **+** buttons to
+step up and down, **Fit** to go back to the whole span, the **Zoom** list to jump
+straight to a setting, or the mouse wheel over the waterfall. The label beside
+them shows the width you are looking at, in Hz, kHz or MHz as the window gets
+narrower ("500 kHz", then "244 Hz"), so it is clear what a click did.
+
+Where the ladder stops is arithmetic rather than taste. The window is the
+receiver span divided by the zoom, the FFT divides that span into bins, so the
+bins left across the window are the FFT size divided by the zoom: at the
+smallest transform the window offers (1024 points) the deepest step still has
+four of them, and one step further would be a single column stretched across the
+whole plot — which looks like a signal and is not one. The plots are redrawn from
+the real spectrum at full resolution rather than a stretched copy, so zooming in
+reveals narrow carriers instead of blurring them. Retuning while zoomed brings
+the new frequency into view instead of leaving it off-screen, and changing the
+zoom blanks the waterfall history — rows already on screen were pooled for a
 different span and no longer mean what the colour scale says.
 
 The window opens at a size that fits the display, and its control rows wrap, so
@@ -339,6 +377,8 @@ their room: at 780×560 the strip costs each plot 21 px, measured.
 --nr/--nr-level      noise reduction on, and how hard (0..100)
 --ft8                decode FT8 headless and print it (see --freq as the dial)
 --mode ft8           open the GUI in FT8 mode, decoder armed
+--theme NAME         open in a colour scheme (night, amber, phosphor,
+                     slate, daylight); default: the one last used
 --reset-settings     forget what was remembered; open on the defaults
 --memories           list saved memory channels, then exit
 --save-memory NAME   save the given frequency/mode as a memory channel
@@ -362,6 +402,9 @@ rspsdr --ft8 --freq 7074000 --duration 60
 
 # back to a known state, having cleared everything the window remembered
 rspsdr --reset-settings
+
+# open in the amber scheme for an evening, without changing what is remembered
+rspsdr --theme amber
 ```
 
 ## How it works
@@ -491,8 +534,13 @@ frequency says, a full-scale tone reads 0 dBFS, averaging blends frames), the
 int16 conversion, the audio output's buffering driven by a stub backend (volume,
 mute, overruns, drain, and that a write after `close()` cannot start another
 player), the settings, the band plan against the presets, the config
-directory migration, and the signal meter's scale — S9 at −73 dBm, 6 dB per
-unit, the standard's 10 dB steps above it, and the readings an operator would
+directory migration, the colour schemes (every one complete, every colour
+parsing, every one *readable* — the text against the window, and the trace, the
+peak marker and the grid against the plot they are drawn on, with the grid
+required to stay quieter than the trace — and the style sheet built from each
+one balanced and fully filled in), and the signal meter's scale — S9 at
+−73 dBm, 6 dB per unit, the standard's 10 dB steps above it, and the readings
+an operator would
 say — plus its dial (evenly spaced marks, every mark pointing where it is drawn,
 a level round-tripping through the needle to within half a mark, the arc
 monotonic across its whole range) and the needle's ballistics (63 % of a step in
@@ -558,12 +606,14 @@ checks exact reconstruction, that a clean keyed carrier and an unkeyed carrier
 both pass with unity gain, that SNR improves monotonically with the level
 setting, and that the cost fits the realtime budget. `tests/test_memory.py`
 covers sorting, replacement by name, persistence, atomic writes and damaged
-files. `tests/test_prefs.py` is about the *second* run: it changes twenty-three
+files. `tests/test_prefs.py` is about the *second* run: it changes twenty-five
 controls of a real (offscreen, unopened) window as a listener would, closes it,
 opens it again and requires every one of them back, including the window's size
-and place, the borrowed FT8 settings and the meter's calibration, peak marker
-and face (down to the widget: the level it was calibrated at comes back as
-S9); it also covers the ground a restart
+and place, the borrowed FT8 settings, the meter's calibration, peak marker and
+face, the colour scheme and whether the controls under the picture are folded
+away (down to the widgets: the level it was calibrated at comes back as S9, the
+scheme is on the plots rather than only in its combo box, and a folded window
+opens folded and small again); it also covers the ground a restart
 cannot show — every value in the table accepted and refused (an out-of-range
 number, a NaN, a boolean where an integer belongs, a mode the receiver would
 raise on, a transform that is not a power of two), a file that is not JSON, a
@@ -603,6 +653,16 @@ signal meter with known levels and reads the pixels back: the red needle has to
 be where the dial geometry puts its tip, either side of centre, and the
 half-second peak marker has to still be holding a signal the needle has left
 behind — with both faces drawn and a switch between them changing the picture. It
+checks where the meter *is*, as geometry: in the top right, above the spectrum
+and so above the waterfall. It checks the rows below the picture are one pane
+whose folding really does hand their height to the picture — the pane shrinks,
+the picture grows by what it gave up, the top of the picture does not move and
+the waterfall's own history gains rows — that the fold button stays on screen
+when everything else here is put away, that `Ctrl+H` folds and unfolds it too,
+and that while those rows are shown the window refuses to shrink past them while
+the folded window still reaches 780x560. It walks every colour scheme and
+requires each to reach the plots, the stroked labels and the application's own
+style sheet, not just the combo box that names it. It
 also checks the window itself: that
 it fits and maximises on the screen, and that no wrapping row leaves a label on
 one line and its control on the next. It drives the real Qt event loop, because

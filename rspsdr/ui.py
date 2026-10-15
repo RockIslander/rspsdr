@@ -11,13 +11,17 @@ Layout
     +--------------------------------------------------------------+
     | memory row: saved channels                                    |
     +--------------------------------------------------------------+
+    | signal meter, top right, above the picture                    |
+    +--------------------------------------------------------------+
     | spectrum plot                                                 |
     +--------------------------------------------------------------+
     | waterfall                                                     |
     +--------------------------------------------------------------+
-    | rf row: gain, tuner bandwidth, fft                            |
+    | fold row: theme, and the meter's own setup                    |
     +--------------------------------------------------------------+
-    | waterfall row: levels, colour, zoom                           |
+    | fold row: gains, tuner bandwidth, fft                         |
+    +--------------------------------------------------------------+
+    | fold row: waterfall levels, colour, detail, zoom              |
     +--------------------------------------------------------------+
     | status bar                                                    |
 ---------------------------------------------------------------
@@ -27,6 +31,12 @@ the window is narrower than their contents.  With an ordinary QHBoxLayout each
 row imposes a hard minimum width equal to the sum of its controls -- 1469 px
 for the tuning row -- which is wider than many screens, and a window whose
 minimum exceeds the screen cannot be maximised or fitted at all.
+
+Everything below the picture is inside one :class:`SettingsPane`, which folds
+away when the waterfall is worth more than the controls are worth.  The
+colours come from :mod:`rspsdr.theme`: one table, applied to the palette, the
+style sheet, the plots' own pens and the labels that carry a colour of their
+own, so that a scheme is a name rather than a dozen hex values in two files.
 """
 
 from __future__ import annotations
@@ -57,8 +67,8 @@ pg.setConfigOptions(useOpenGL=False, antialias=False)
 
 from PyQt6.QtCore import (QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt,
                           QTimer, pyqtSignal)
-from PyQt6.QtGui import (QBrush, QColor, QFont, QLinearGradient, QPainter,
-                         QPainterPath, QPen)
+from PyQt6.QtGui import (QBrush, QColor, QFont, QKeySequence, QLinearGradient,
+                         QPainter, QPainterPath, QPalette, QPen, QShortcut)
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout,
     QHeaderView, QInputDialog, QLabel, QLayout, QMainWindow, QMessageBox,
@@ -66,7 +76,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from . import bands, ft8, logo, prefs, smeter
+from . import bands, ft8, logo, prefs, smeter, theme
 from .memory import Channel, MemoryStore
 from .radio import (TUNER_BANDWIDTHS, Radio, Settings, list_devices,
                     transient_open_error)
@@ -117,7 +127,30 @@ COLORMAPS = [
 ]
 
 # Frequency magnification for the plots.  The receiver span is divided by this.
-ZOOMS = [("1x", 1), ("2x", 2), ("4x", 4), ("8x", 8), ("16x", 16)]
+#
+# The ladder stops at 256x, and where it stops is arithmetic rather than taste:
+# the window is the receiver span over the zoom, and the FFT divides that span
+# into bins, so the number of bins left across the window is n_fft / zoom.  The
+# smallest transform the window offers is 1024 points, so even the deepest step
+# has four bins to draw -- and a window one bin wide would be a single column
+# stretched across the whole plot.  At the lowest sample rate that is 244 Hz
+# across the window, a CW signal and its neighbours; at 2 MSps it is 7.8 kHz,
+# which resolves the carriers inside one AM channel.
+ZOOMS = [("1x", 1), ("2x", 2), ("4x", 4), ("8x", 8), ("16x", 16), ("32x", 32),
+         ("64x", 64), ("128x", 128), ("256x", 256)]
+ZOOM_MAX = ZOOMS[-1][1]                 # the ladder's deepest step
+
+# FFT sizes on offer.  This is where the waterfall's resolution ultimately comes
+# from: a bin is one span/n_fft of spectrum, and the waterfall shows the visible
+# slice of those bins, so doubling the FFT halves the width of the finest thing
+# that can be drawn -- and halves the number of bins the deepest zoom of the
+# ladder above has left to draw.  It costs DSP time in proportion, which is why
+# the top of this list only became affordable once the transform moved to
+# scipy.fft (measured on an i5-4590T: a 16384-point transform of two million
+# samples a second went from 5.2 ms to 2.1 ms a frame, so 32768 and 65536 now
+# cost what 8192 and 16384 used to).  The two tables are tied together by that
+# arithmetic and tests/test_units.py checks the tie.
+FFTS = (1024, 2048, 4096, 8192, 16384, 32768, 65536)
 
 # Width of the left axis, forced to be the same on both plots.
 #
@@ -178,6 +211,23 @@ WF_MAX_COLS = WF_DETAILS[-1][1]         # the widest picture on offer
 # across the foot of the waterfall whenever the floor then moved down: the
 # stale rows were suddenly above the new floor and lit up at full brightness.
 WF_BLANK_DB = -200.0
+
+# The window's smallest size.  Two floors, not one, because the controls below
+# the picture are what decides it:
+#
+#   * with the pane folded away the window can be as small as it has always
+#     been -- 780x560, the size that fits any screen this is likely to be run
+#     on, so maximising and fitting both work;
+#   * with the rows on show it cannot.  Qt does not say so: when the rows need
+#     more height than the window has it squeezes the *picture* down to nothing
+#     and then clips the rows at the bottom edge, so the zoom buttons sit below
+#     the window with nothing on screen to explain it (measured: +/-/Fit 18 px
+#     under the bottom edge at 780x560 with the pane open).  The floor is
+#     therefore the rows' own height-for-width at the width the window has,
+#     plus PLOT_MIN_HEIGHT for the picture.  See MainWindow._update_floor.
+MIN_WIDTH = 780
+FOLDED_MIN_HEIGHT = 560
+PLOT_MIN_HEIGHT = 120
 
 REPAINT_MS = 45
 
@@ -364,6 +414,51 @@ def two_tick_levels(plot: pg.PlotWidget):
     """
     for name in ("bottom", "left", "top", "right"):
         plot.getAxis(name).setStyle(maxTickLevel=1, maxTextLevel=1)
+
+
+def apply_theme(app: QApplication, name: str) -> dict:
+    """Put a colour scheme on the whole application, and hand it back.
+
+    Returned as well as installed, because a scheme covers two different kinds
+    of thing: what Qt paints from the palette and the style sheet below, and
+    what this module paints by hand -- the plots' pens and backgrounds, the
+    passband wash, and the labels whose colour is not the ordinary text one
+    (see ``MainWindow._recolour``).
+
+    Fusion is set here rather than left to the desktop.  A GTK, a Windows and
+    a macOS style each draw their widgets from their own images and take only
+    part of a palette, so one scheme came out as three different windows; of
+    the styles Qt ships, Fusion is the one that follows the table on every
+    platform.  Setting it does not change what the window can do -- the
+    layouts, the wrapping rows and the plots are the same widgets either way.
+    """
+    pal = theme.palette(name)
+    role = QPalette.ColorRole
+    colours = (
+        ("window", role.Window), ("text", role.WindowText),
+        ("field", role.Base), ("panel", role.AlternateBase),
+        ("text", role.Text), ("panel", role.Button),
+        ("text", role.ButtonText), ("bright", role.BrightText),
+        ("highlight", role.Highlight), ("highlight_text", role.HighlightedText),
+        ("panel", role.ToolTipBase), ("text", role.ToolTipText),
+        ("muted", role.PlaceholderText), ("border", role.Mid),
+        ("border", role.Dark), ("border", role.Light),
+        ("border", role.Shadow), ("accent", role.Link),
+    )
+    palette = QPalette()
+    for key, which in colours:
+        palette.setColor(which, QColor(pal[key]))
+    # Greyed-out text is a shade of the theme rather than the platform's idea
+    # of grey, which on a light scheme is unreadable on the panel behind it.
+    muted = QColor(pal["muted"])
+    for which in (role.Text, role.ButtonText, role.WindowText,
+                  role.PlaceholderText):
+        palette.setColor(QPalette.ColorGroup.Disabled, which, muted)
+
+    app.setStyle("Fusion")
+    app.setPalette(palette)
+    app.setStyleSheet(theme.stylesheet(pal))
+    return pal
 
 
 class FastImage(pg.ImageItem):
@@ -1279,16 +1374,108 @@ class DeviceOpener(QObject):
         self._try_now()
 
 
+class SettingsPane(QWidget):
+    """Every control below the picture, folded away when it is not wanted.
+
+    The picture is what is being watched and the controls are what is being
+    changed, and on a short window the two compete for the same height.
+    Shutting this pane hides its rows, and the splitter above takes the space
+    back -- the waterfall grows by exactly what the rows were using: 120 px of
+    it on a 1360x768 screen, and more again once the rows have wrapped on a
+    narrow one.
+
+    The fold button is part of the pane rather than a row inside it, because
+    it is the one thing here that has to stay reachable when everything else
+    has been put away.  The state is called *folded* everywhere -- the file,
+    the shortcut and the tests -- so that one word means one thing.
+    """
+
+    folded = pyqtSignal(bool)
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._folded = False
+        self._rows: list[QWidget] = []
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+
+        head = QWidget()
+        h = QHBoxLayout(head)
+        h.setContentsMargins(4, 0, 4, 0)
+        h.setSpacing(8)
+        self.btn_fold = QPushButton()
+        self.btn_fold.setCheckable(True)
+        self.btn_fold.setToolTip(
+            "Fold the controls below the waterfall away and give their height "
+            "to the waterfall (Ctrl+H)")
+        self.btn_fold.clicked.connect(lambda: self.set_folded(not self._folded))
+        h.addWidget(self.btn_fold)
+        self.lbl_hint = QLabel("")
+        h.addWidget(self.lbl_hint)
+        h.addStretch(1)
+        self.head = head
+        lay.addWidget(head)
+
+        self.body = QWidget()
+        self.body_lay = QVBoxLayout(self.body)
+        self.body_lay.setContentsMargins(0, 0, 0, 0)
+        self.body_lay.setSpacing(4)
+        lay.addWidget(self.body)
+        self._sync()
+
+    def add_row(self, row: QWidget):
+        """Add one control row to the half of the pane that folds."""
+        self._rows.append(row)
+        self.body_lay.addWidget(row)
+
+    def rows(self) -> list[QWidget]:
+        """The rows being shown or hidden, in the order they were added."""
+        return list(self._rows)
+
+    def is_folded(self) -> bool:
+        return self._folded
+
+    def toggle(self):
+        self.set_folded(not self._folded)
+
+    def set_folded(self, folded: bool, *, notify: bool = True):
+        """Fold or unfold.  ``notify=False`` is for a value read from the file:
+        the window is only being brought into line with it, not changed."""
+        folded = bool(folded)
+        changed = folded != self._folded
+        self._folded = folded
+        self._sync()
+        if notify and changed:
+            self.folded.emit(folded)
+
+    def _sync(self):
+        shown = not self._folded
+        self.body.setVisible(shown)
+        self.btn_fold.setChecked(self._folded)
+        self.btn_fold.setText("▸  Settings" if self._folded else "▾  Settings")
+        self.lbl_hint.setText(
+            "folded away — the waterfall has the height" if self._folded else
+            "every control below the picture; hide them for a taller waterfall")
+
+
 class MainWindow(QMainWindow):
     def __init__(self, settings: Settings | None = None,
                  memory_path: str | None = None,
-                 prefs_store: prefs.PrefsStore | None = None):
+                 prefs_store: prefs.PrefsStore | None = None,
+                 theme_name: str | None = None):
         """``prefs_store`` is where the settings are remembered between runs.
 
         Passed in rather than opened here, and optional: with no store the
         window is a plain window that forgets everything, which is what a test
         and a ``--screenshot`` run both want -- neither should be able to write
         over the settings of the person using the program.
+
+        ``theme_name`` is the colour scheme the command line asked for, if it
+        asked for one.  Last of the arguments, and by keyword at every call
+        site, so that the ones before it keep their places: this parameter once
+        goes before ``memory_path`` and ``MainWindow(Settings(), path)`` places
+        a channel file in a colour scheme.
         """
         super().__init__()
         self.setWindowTitle(f"{logo.APP_NAME} -- {logo.APP_TAGLINE}")
@@ -1334,13 +1521,31 @@ class MainWindow(QMainWindow):
         self.wants_maximised = False    # set by _restore_window_state
         self._shown = False             # has showEvent run?
 
+        # The colour scheme first, before a single row is built: every control
+        # below reads its colour from it as it is made, and a window that
+        # opened in one scheme and repainted itself in another would flash.
+        self.theme_name = self._chosen_theme(theme_name)
+        self.theme = theme.palette(self.theme_name)
+        # (label, theme key) for everything whose colour is its own rather than
+        # the ordinary text colour; a scheme change has to walk them, because
+        # a style sheet set on a widget beats the application's (see
+        # _recolour).
+        self._tinted: list[tuple[QLabel, str]] = []
+        app = QApplication.instance()
+        if app is not None:
+            apply_theme(app, self.theme_name)
+
         self._build_ui()
         self._connect()
+        self._recolour()
         # The stored window state, applied while _building is still set: the
         # handlers run (so the widgets and the picture agree with the file), but
         # nothing is written back out of a half-built window.
         self._apply_saved_ui()
         self._building = False
+        # ... and with the pane's state settled, the shortest this window may
+        # be (before _restore_window_state, which asks for it).
+        self._update_floor()
 
         self._timer = QTimer(self)
         self._timer.setInterval(REPAINT_MS)
@@ -1386,6 +1591,10 @@ class MainWindow(QMainWindow):
         root.addWidget(self._build_tuning_row())
         root.addWidget(self._build_mode_row())
         root.addWidget(self._build_memory_row())
+        # The last row before the picture, and the one nearest it: the signal
+        # meter reads what the picture below it shows, and an operator glancing
+        # at the needle is looking at the top right of the set.
+        root.addWidget(self._build_meter_row())
 
         self.spectrum = SpectrumPlot()
         self.waterfall = WaterfallPlot()
@@ -1395,8 +1604,18 @@ class MainWindow(QMainWindow):
         self.split.setSizes([300, 340])     # the divider is remembered too
         root.addWidget(self.split, 1)
 
-        root.addWidget(self._build_rf_row())
-        root.addWidget(self._build_waterfall_row())
+        # Everything that is set rather than listened to, in one pane that
+        # folds away (Ctrl+H, and remembered).  With it shut, the height these
+        # rows were using is the splitter's, so the waterfall grows by what the
+        # controls gave up.  The FT8 strip is deliberately *not* in here: it is
+        # a decode log that appears when the mode is selected, not a setting,
+        # and folding the settings away must not take the log with them.
+        self.settings_pane = SettingsPane()
+        self.settings_pane.add_row(self._build_look_row())
+        self.settings_pane.add_row(self._build_rf_row())
+        self.settings_pane.add_row(self._build_waterfall_row())
+        self._tint(self.settings_pane.lbl_hint, "muted")
+        root.addWidget(self.settings_pane)
 
         # Last, under the controls, and hidden until FT8 is selected: a decode
         # list belongs at the foot of the window, where it reads as a log and
@@ -1423,8 +1642,10 @@ class MainWindow(QMainWindow):
         """
         # Small enough to fit any realistic screen (so maximising always
         # works), large enough that the plots are still worth looking at once
-        # the control rows have wrapped.
-        self.setMinimumSize(780, 560)
+        # the control rows have wrapped.  This is the *folded* floor; the
+        # unfolded one is worked out from the rows themselves once they exist
+        # (see _update_floor).
+        self.setMinimumSize(MIN_WIDTH, FOLDED_MIN_HEIGHT)
         screen = QApplication.primaryScreen()
         if screen is None:                      # pragma: no cover
             self.resize(1280, 860)
@@ -1435,6 +1656,33 @@ class MainWindow(QMainWindow):
         self.resize(w, h)
         self.move(avail.x() + max(0, (avail.width() - w) // 2),
                   avail.y() + max(0, (avail.height() - h) // 2))
+
+    def _chosen_theme(self, given: str | None) -> str:
+        """Which colour scheme to open in: the command line, then the file.
+
+        An unknown name from either is not an error and does not become one:
+        the default scheme is used instead, the same way every other unusable
+        remembered value falls back to its default rather than refusing.
+        """
+        if given in theme.names():
+            return given
+        if self.prefs is not None:
+            remembered = self.prefs.value("ui", "theme", "choice",
+                                          tuple(theme.names()), None)
+            if remembered in theme.names():
+                return remembered
+        return theme.DEFAULT
+
+    def _tint(self, widget: QLabel, key: str) -> QLabel:
+        """Colour a label from the theme, and remember it to be re-coloured.
+
+        A style sheet set on a widget wins over the application's, so these
+        cannot be left to the palette -- they are recorded here and repainted
+        one by one when the scheme changes (see :meth:`_recolour`).
+        """
+        self._tinted.append((widget, key))
+        widget.setStyleSheet(f"color:{self.theme[key]}")
+        return widget
 
     def _build_header(self) -> QWidget:
         """The application's mark and name, across the top of the window."""
@@ -1448,11 +1696,11 @@ class MainWindow(QMainWindow):
 
         name = QLabel(logo.APP_NAME)
         name.setFont(mono_font(17, True))
-        name.setStyleSheet("color:#e9f5ff")
+        self._tint(name, "bright")
         h.addWidget(name)
 
         tag = QLabel(logo.APP_TAGLINE)
-        tag.setStyleSheet("color:#7f97ab")
+        self._tint(tag, "muted")
         h.addWidget(tag)
         h.addStretch(1)
 
@@ -1489,19 +1737,104 @@ class MainWindow(QMainWindow):
             h.addWidget(c)
         return box
 
+    def _build_meter_row(self) -> QWidget:
+        """The signal meter, upper right, in the row above the picture.
+
+        It used to sit inside the gain row, among a dozen boxes, where the one
+        instrument in the window that is meant to be read at a glance was the
+        hardest thing to find.  Here it is the top right corner of the display
+        area, which is where a transceiver puts it, with the same reading in
+        figures beside it for the times the needle is between two marks.  Its
+        setup -- the calibration, the peak marker and the face -- is with the
+        rest of the settings below the picture.
+        """
+        w = QWidget()
+        h = QHBoxLayout(w)
+        h.setContentsMargins(4, 0, 4, 0)
+        h.setSpacing(8)
+        h.addStretch(1)                 # the pair sits against the right edge
+
+        self.lbl_smeter = QLabel("")            # the same reading as text
+        self.lbl_smeter.setFont(mono_font(9))
+        self._tint(self.lbl_smeter, "text")
+        self.lbl_smeter.setMinimumWidth(132)
+        self.lbl_smeter.setAlignment(Qt.AlignmentFlag.AlignRight
+                                     | Qt.AlignmentFlag.AlignVCenter)
+        h.addWidget(self.lbl_smeter)
+
+        self.smeter = SMeter()
+        h.addWidget(self.smeter)
+        return w
+
+    def _build_look_row(self) -> QWidget:
+        """How the window looks, and what the meter is set to read."""
+        w, lay = self._row()
+
+        self.cmb_theme = QComboBox()
+        for name in theme.names():
+            self.cmb_theme.addItem(theme.label(name), name)
+            self.cmb_theme.setItemData(self.cmb_theme.count() - 1,
+                                       theme.note(name),
+                                       Qt.ItemDataRole.ToolTipRole)
+        self.cmb_theme.setToolTip(
+            "The window's colour scheme.  One table sets the palette, the "
+            "controls, the plots and the labels, so everything that can be "
+            "coloured follows this one choice.\n"
+            "Daylight is for a bright room or a projector; the rest are dark.")
+        lay.addWidget(self._pair("Theme", self.cmb_theme))
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.VLine)
+        lay.addWidget(sep)
+
+        # The meter's own settings, here rather than beside the needle: the
+        # needle is up above the picture now, and a control that changes a
+        # setting belongs with the other settings, not in the corner of the
+        # display.
+        self.spn_sref = QDoubleSpinBox()
+        self.spn_sref.setDecimals(1)
+        self.spn_sref.setRange(-140.0, 0.0)
+        self.spn_sref.setSingleStep(0.5)
+        self.spn_sref.setSuffix(" dBFS")
+        self.spn_sref.setValue(smeter.DEFAULT_REF_DBFS)
+        self.spn_sref.setToolTip(
+            "The level that reads S9.  The RSP1 reports the level in dBFS and "
+            "has no absolute calibration of its own, so this one number is "
+            "what puts the scale in the right place: set it until the meter "
+            "agrees with a station, or a signal generator, of known strength.\n"
+            "Set it at the IF and RF gain you actually use, because the level "
+            "it is measured from is taken after those stages.")
+        lay.addWidget(self._pair("S9 at", self.spn_sref))
+
+        self.chk_speak = QCheckBox("Peak")
+        self.chk_speak.setChecked(True)
+        self.chk_speak.setToolTip(
+            "A second needle that holds the highest level of the last half "
+            "second, so a brief signal is not missed between repaints")
+        lay.addWidget(self.chk_speak)
+
+        self.cmb_sface = QComboBox()
+        for name in smeter.FACE_NAMES:
+            self.cmb_sface.addItem(name.capitalize(), name)
+        self.cmb_sface.setToolTip(
+            "Meter scale colouring: the dark face of the later radios, or the "
+            "cream dial of the older analogue ones.  The face is the meter's "
+            "own -- a scheme does not change it -- and the cream one is the "
+            "one that sits well on the Daylight scheme.")
+        lay.addWidget(self._pair("Face", self.cmb_sface))
+
+        return w
+
     def _build_tuning_row(self) -> QWidget:
         w, lay = self._row()
 
         self.btn_start = QPushButton("▶  Start")
         self.btn_start.setMinimumWidth(96)
-        self.btn_start.setStyleSheet(
-            "QPushButton{background:#1d7a46;color:white;font-weight:bold;"
-            "padding:6px 10px;border-radius:4px}"
-            "QPushButton:hover{background:#249155}")
+        self.btn_start.setStyleSheet(self._start_button_style(False))
         lay.addWidget(self.btn_start)
 
         self.lbl_device = QLabel("no device")
-        self.lbl_device.setStyleSheet("color:#9fb0c0")
+        self._tint(self.lbl_device, "muted")
         lay.addWidget(self.lbl_device)
 
         self.cmb_rate = QComboBox()
@@ -1535,7 +1868,7 @@ class MainWindow(QMainWindow):
 
         self.lbl_band = QLabel("—")
         self.lbl_band.setFont(mono_font(11, True))
-        self.lbl_band.setStyleSheet("color:#7fe7ff")
+        self._tint(self.lbl_band, "accent")
         self.lbl_band.setMinimumWidth(60)
         lay.addWidget(self.lbl_band)
 
@@ -1686,7 +2019,7 @@ class MainWindow(QMainWindow):
         self.btn_mem_delete = QPushButton("Delete")
 
         self.lbl_mem = QLabel("")
-        self.lbl_mem.setStyleSheet("color:#9fb0c0")
+        self._tint(self.lbl_mem, "muted")
         lay.addWidget(self._pair("Memory", self.cmb_mem))
         for b in (self.btn_mem_recall, self.btn_mem_save, self.btn_mem_update,
                   self.btn_mem_delete):
@@ -1709,6 +2042,7 @@ class MainWindow(QMainWindow):
         self.sld_if.setFixedWidth(160)
         self.lbl_if = QLabel(f"{int(self.settings.if_gain)} dB")
         self.lbl_if.setFont(mono_font(9))
+        self._tint(self.lbl_if, "muted")
         self.lbl_if.setMinimumWidth(48)
         lay.addWidget(self._pair("IF gain", self.sld_if, self.lbl_if))
 
@@ -1734,16 +2068,8 @@ class MainWindow(QMainWindow):
         sep.setFrameShape(QFrame.Shape.VLine)
         lay.addWidget(sep)
 
-        # The FFT size is where the waterfall's resolution ultimately comes
-        # from: a bin is one span/n_fft of spectrum, and the waterfall shows the
-        # visible slice of those bins, so doubling the FFT halves the width of
-        # the finest thing that can be drawn.  It costs DSP time in proportion
-        # -- which is why the top of this list only became affordable once the
-        # transform moved to scipy.fft (measured on an i5-4590T: a 16384-point
-        # transform of two million samples a second went from 5.2 ms to 2.1 ms
-        # a frame, so 32768 and 65536 now cost what 8192 and 16384 used to).
         self.cmb_fft = QComboBox()
-        for n in (1024, 2048, 4096, 8192, 16384, 32768, 65536):
+        for n in FFTS:
             self.cmb_fft.addItem(str(n), n)
         # Whatever the settings say, which is the remembered size -- or one from
         # a settings file this list does not name, in which case it is added so
@@ -1765,46 +2091,10 @@ class MainWindow(QMainWindow):
         sep.setFrameShape(QFrame.Shape.VLine)
         lay.addWidget(sep)
 
-        # The signal meter, with the gain controls it is watching: it reads the
-        # passband level, so it is the thing that shows what IF gain and RF gain
-        # are doing to the signal.  Sectional drawing is in rspsdr/smeter.py.
-        self.smeter = SMeter()
-        self.lbl_smeter = QLabel("")            # the same reading as text
-        self.lbl_smeter.setFont(mono_font(9))
-        self.lbl_smeter.setStyleSheet("color:#cfd9e4")
-        self.lbl_smeter.setMinimumWidth(132)
-        lay.addWidget(self._pair(self.smeter, self.lbl_smeter))
-
-        self.spn_sref = QDoubleSpinBox()
-        self.spn_sref.setDecimals(1)
-        self.spn_sref.setRange(-140.0, 0.0)
-        self.spn_sref.setSingleStep(0.5)
-        self.spn_sref.setSuffix(" dBFS")
-        self.spn_sref.setValue(smeter.DEFAULT_REF_DBFS)
-        self.spn_sref.setToolTip(
-            "The level that reads S9.  The RSP1 reports the level in dBFS and "
-            "has no absolute calibration of its own, so this one number is what "
-            "puts the scale in the right place: set it until the meter agrees "
-            "with a station, or a signal generator, of known strength.\n"
-            "Set it at the IF and RF gain you actually use, because the level "
-            "it is measured from is taken after those stages.")
-        lay.addWidget(self._pair("S9 at", self.spn_sref))
-
-        self.chk_speak = QCheckBox("Peak")
-        self.chk_speak.setChecked(True)
-        self.chk_speak.setToolTip(
-            "A second needle that holds the highest level of the last half "
-            "second, so a brief signal is not missed between repaints")
-        lay.addWidget(self.chk_speak)
-
-        self.cmb_sface = QComboBox()
-        for name in smeter.FACE_NAMES:
-            self.cmb_sface.addItem(name.capitalize(), name)
-        self.cmb_sface.setToolTip(
-            "Meter scale colouring: the dark face of the later radios, or the "
-            "cream dial of the older analogue ones")
-        lay.addWidget(self._pair("Face", self.cmb_sface))
-
+        # The signal meter that used to be here has moved to the row above the
+        # picture, and its setup -- S9 at, Peak, Face -- to the look row: what
+        # is left is the receiver's own gain and resolution, which is what this
+        # row is for.
         return w
 
     def _build_waterfall_row(self) -> QWidget:
@@ -1879,7 +2169,12 @@ class MainWindow(QMainWindow):
             self.cmb_zoom.addItem(name, val)
         self.cmb_zoom.setToolTip(
             "Magnify both plots about the receiver centre; retuning keeps the "
-            "signal in view")
+            "signal in view.\n"
+            "The ladder runs to 256x, which on a 2 MSps span is a 7.8 kHz "
+            "window.  How much of it the FFT can fill is the FFT size divided "
+            "by the zoom: the picture stops getting finer once that is down to "
+            "one bin per column, and the status line says what a column is "
+            "worth in Hz.")
 
         # Buttons as well as the list: the list says what the magnification is,
         # the buttons are how you change it without having to open anything.
@@ -1896,7 +2191,7 @@ class MainWindow(QMainWindow):
         self.btn_zoom_fit.clicked.connect(self._zoom_fit)
         self.lbl_zoom = QLabel()
         self.lbl_zoom.setFont(mono_font(9))
-        self.lbl_zoom.setStyleSheet("color:#9fb0c0")
+        self._tint(self.lbl_zoom, "muted")
         self.lbl_zoom.setMinimumWidth(66)
         self.lbl_zoom.setToolTip("The frequency width currently on screen")
         lay.addWidget(self._pair("Zoom", self.btn_zoom_out, self.cmb_zoom,
@@ -1914,9 +2209,7 @@ class MainWindow(QMainWindow):
         """The FT8 strip: band presets, the slot clock, and the decode list."""
         w = QFrame()
         w.setObjectName("ft8panel")
-        w.setStyleSheet(
-            "#ft8panel{background:#0c1721;border:1px solid #1d3446;"
-            "border-radius:4px}")
+        w.setStyleSheet(self._panel_style("ft8panel"))
         lay = QVBoxLayout(w)
         lay.setContentsMargins(7, 5, 7, 5)
         lay.setSpacing(4)
@@ -1948,7 +2241,7 @@ class MainWindow(QMainWindow):
 
         self.lbl_ft8 = QLabel("")
         self.lbl_ft8.setFont(mono_font(10))
-        self.lbl_ft8.setStyleSheet("color:#8fd8f0")
+        self._tint(self.lbl_ft8, "accent")
         self.lbl_ft8.setToolTip("Slot clock, decoder state, and totals")
         row.addWidget(self.lbl_ft8)
         lay.addWidget(top)
@@ -2032,6 +2325,14 @@ class MainWindow(QMainWindow):
         self.chk_speak.toggled.connect(self._smeter_peak_changed)
         self.cmb_sface.currentIndexChanged.connect(self._smeter_face_changed)
 
+        self.cmb_theme.currentIndexChanged.connect(self._theme_changed)
+        self.settings_pane.folded.connect(self._settings_folded)
+        # A key for it as well as the button: the point of folding the controls
+        # away is to see more of the picture, and a pointer trip down to that
+        # row and back is most of what there was to avoid.
+        self._fold_shortcut = QShortcut(QKeySequence("Ctrl+H"), self)
+        self._fold_shortcut.activated.connect(self._fold_settings)
+
         self.cmb_ft8band.currentIndexChanged.connect(self._ft8_band_selected)
         self.chk_ft8every.toggled.connect(self._ft8_every_changed)
         self.btn_ft8clear.clicked.connect(self._ft8_clear)
@@ -2082,6 +2383,135 @@ class MainWindow(QMainWindow):
     # far it is zoomed, what the picture looks like, which FT8 band -- and the
     # geometry of the window itself.
 
+    # ------------------------------------------------------- appearance
+    def _panel_style(self, name: str) -> str:
+        """A raised panel's own style sheet, in the current theme's colours."""
+        p = self.theme
+        return (f"#{name}{{background:{p['panel']};border:1px solid "
+                f"{p['border']};border-radius:4px}}")
+
+    def _start_button_style(self, running: bool) -> str:
+        """The Start / Stop button: green to go, red to stop, in-theme.
+
+        On the button rather than in the application's style sheet, which
+        every other QPushButton follows: this one carries a meaning, and it has
+        to keep it under a scheme that would otherwise paint it like the rest.
+        """
+        key, hover = (("stop", "stop_hover") if running
+                      else ("run", "run_hover"))
+        return (f"QPushButton{{background:{self.theme[key]};color:white;"
+                f"font-weight:bold;padding:6px 10px;border-radius:4px}}"
+                f"QPushButton:hover{{background:{self.theme[hover]}}}")
+
+    def _use_theme(self, name: str, *, remember: bool = True):
+        """Put a colour scheme on the window, and redraw what carries one."""
+        self.theme_name = name if name in theme.names() else theme.DEFAULT
+        self.theme = theme.palette(self.theme_name)
+        app = QApplication.instance()
+        if app is not None:
+            apply_theme(app, self.theme_name)
+        self._recolour()
+        if remember:
+            self._remember_soon()
+
+    def _recolour(self):
+        """Repaint everything whose colour is not simply the palette's.
+
+        The palette and the style sheet are the application's business (see
+        :func:`apply_theme`).  What is left over is here for three reasons:
+        the plots are painted item by item, so their backgrounds, their pens
+        and the passband wash have to be set again; a style sheet on a label
+        beats the application's, which is what the tinted readouts use; and the
+        FT8 strip is a frame whose panel colour is its own style sheet.
+        """
+        p = self.theme
+        for plot in (self.spectrum, self.waterfall):
+            plot.setBackground(p["plot"])
+            for side in ("left", "bottom"):
+                axis = plot.getAxis(side)
+                axis.setPen(pg.mkPen(p["grid"], width=1.0))
+                axis.setTextPen(pg.mkPen(p["muted"]))
+        # The grid's colour follows the axis pen; this is only how strongly it
+        # is drawn, and a light scheme needs more of it to be seen at all.
+        self.spectrum.showGrid(x=True, y=True, alpha=float(p["grid_alpha"]))
+        self.spectrum.curve.setPen(pg.mkPen(p["accent"], width=1.2))
+        self.spectrum.peak_curve.setPen(pg.mkPen(p["peak"], width=1.0))
+        self.spectrum.marker.setPen(pg.mkPen(p["marker"], width=1.6))
+        self.spectrum.band.setBrush(pg.mkBrush(*theme.rgb(p["band"]), 40))
+        for label, key in self._tinted:
+            label.setStyleSheet(f"color:{p[key]}")
+        self.ft8_panel.setStyleSheet(self._panel_style("ft8panel"))
+        self.btn_start.setStyleSheet(self._start_button_style(self._ui_running))
+        # The FT8 readout says more than one thing in more than one colour, so
+        # its own handler is what colours it: run it again for the new scheme.
+        if self.ft8_panel.isVisible():
+            self._ft8_tick()
+
+    def _theme_changed(self, *_):
+        self._use_theme(str(self.cmb_theme.currentData()))
+
+    # -- folding the controls away -----------------------------------
+    def _fold_settings(self):
+        """Ctrl+H: fold the controls away, or bring them back."""
+        self.settings_pane.toggle()
+
+    def _settings_folded(self, _folded: bool):
+        """The pane was folded or unfolded: the plots take the height either
+        way, and the window may not need to be as tall as it just was."""
+        self._update_floor()
+        self._remember_soon()
+
+    def _update_floor(self):
+        """The shortest this window may be, given what it is showing now.
+
+        With the controls folded away that is the small fixed floor the window
+        has always had.  With them on show it is what they actually need: the
+        rows are height-for-width, so their height depends on the width the
+        window has (they wrap onto more lines when it is narrow), and the
+        answer is the sum of those heights plus a minimum for the picture.
+
+        Qt will not work this out on its own, because every control row has a
+        small minimum size -- one control per line is the worst case the
+        wrapping layout reports -- so a window smaller than its rows is within
+        Qt's rules and the rows are simply cut off by the bottom edge.  A
+        control nobody can see, with nothing to say it is there, is worse than
+        a window that will not shrink any further.
+        """
+        if not hasattr(self, "settings_pane"):
+            return
+        if self.settings_pane.is_folded():
+            floor = FOLDED_MIN_HEIGHT
+        else:
+            lay = self.centralWidget().layout()
+            margins = lay.contentsMargins()
+            floor = (margins.top() + margins.bottom()
+                     + lay.spacing() * max(0, lay.count() - 1))
+            width = max(self.width(), MIN_WIDTH)
+            for i in range(lay.count()):
+                wdg = lay.itemAt(i).widget()
+                if wdg is None or wdg.isHidden():
+                    continue            # a hidden FT8 strip takes no height
+                if wdg is self.split:
+                    floor += PLOT_MIN_HEIGHT
+                elif wdg.hasHeightForWidth():
+                    floor += wdg.heightForWidth(width)
+                else:
+                    floor += wdg.sizeHint().height()
+        floor = max(FOLDED_MIN_HEIGHT, int(floor))
+        if floor != self.minimumHeight() or self.minimumWidth() != MIN_WIDTH:
+            self.setMinimumSize(MIN_WIDTH, floor)
+
+    def resizeEvent(self, ev):                 # noqa: N802
+        """A narrower window wraps its rows, so its floor is higher.
+
+        Recomputed here rather than only when the pane is folded, because the
+        rows' height-for-width is a function of the width and the floor has to
+        follow it: a window dragged narrow enough that the rows no longer fit
+        stops there instead of cutting them off.
+        """
+        super().resizeEvent(ev)
+        self._update_floor()
+
     def _select_data(self, combo, value, default_index: int = 0) -> None:
         """Select the entry holding ``value``, or fall back to the default.
 
@@ -2098,10 +2528,17 @@ class MainWindow(QMainWindow):
         p = self.prefs
         if p is None:
             return
+        # The color scheme is settled in __init__ -- the command line has to
+        # have its say before a single row is built -- so this is only the
+        # list being brought into line with the scheme already in use.
+        self._use_theme(self.theme_name, remember=False)
+        self._select_data(self.cmb_theme, self.theme_name)
+        self.settings_pane.set_folded(
+            p.value("ui", "settings_folded", "flag", (), False), notify=False)
         self._select_data(self.cmb_step, p.value("ui", "step", "int",
                                                  (1, 1_000_000), self._step))
         self._select_data(self.cmb_zoom, p.value("ui", "zoom", "int",
-                                                 (1, 64), self._zoom))
+                                                 (1, ZOOM_MAX), self._zoom))
         self.chk_wfauto.setChecked(p.value("ui", "wf_auto", "flag", (), True))
         self.spn_wflo.setValue(p.value("ui", "wf_floor", "number",
                                        (-160.0, 20.0), self.spn_wflo.value()))
@@ -2229,6 +2666,8 @@ class MainWindow(QMainWindow):
         p.put("ui", "s_meter_ref", float(self.spn_sref.value()))
         p.put("ui", "s_meter_peak", bool(self.chk_speak.isChecked()))
         p.put("ui", "s_meter_face", str(self.cmb_sface.currentData()))
+        p.put("ui", "theme", str(self.theme_name))
+        p.put("ui", "settings_folded", bool(self.settings_pane.is_folded()))
         p.put("ui", "ft8_every", bool(self.chk_ft8every.isChecked()))
         sizes = self.split.sizes()
         if len(sizes) == 2:
@@ -2369,13 +2808,7 @@ class MainWindow(QMainWindow):
     def _set_running_ui(self, running: bool):
         self._ui_running = bool(running)
         self.btn_start.setText("■  Stop" if running else "▶  Start")
-        self.btn_start.setStyleSheet(
-            "QPushButton{background:#a03030;color:white;font-weight:bold;"
-            "padding:6px 10px;border-radius:4px}"
-            "QPushButton:hover{background:#c03a3a}" if running else
-            "QPushButton{background:#1d7a46;color:white;font-weight:bold;"
-            "padding:6px 10px;border-radius:4px}"
-            "QPushButton:hover{background:#249155}")
+        self.btn_start.setStyleSheet(self._start_button_style(running))
 
     def _apply(self, **kw):
         if self._building:
@@ -2616,12 +3049,19 @@ class MainWindow(QMainWindow):
         wf = self.waterfall
         span = float(self.settings.sample_rate) / max(1, self._zoom)
         per_col = span / max(wf.cols(), 1)
-        offer = ("" if wf.bins() <= wf.cols()
-                 else f", {wf.bins():,} bins on offer")
+        if wf.bins() > wf.cols():
+            detail = f", {wf.bins():,} bins on offer"
+        else:
+            # Fewer bins than the plot has pixels: one column is one bin, and
+            # the picture is as fine as the transform can make it.  That is
+            # what a deep zoom looks like until the FFT size goes up, so it is
+            # worth saying rather than leaving the columns to look coarse for
+            # no reason.
+            detail = ", one column per FFT bin"
         self._on_status_line(
             f"waterfall detail {self.cmb_wfdetail.currentText()} -- "
             f"{wf.cols():,} columns x {wf.rows()} rows, "
-            f"{per_col/1e3:.2f} kHz per column{offer}")
+            f"{per_col/1e3:.2f} kHz per column{detail}")
 
     def _zoom_step(self, direction: int):
         """One step along the zoom ladder -- the + / - buttons and the wheel."""
@@ -2638,9 +3078,23 @@ class MainWindow(QMainWindow):
         self.cmb_zoom.setCurrentIndex(0)
 
     def _update_zoom_readout(self):
+        """How much frequency is across the window, at the zoom in force.
+
+        Three units, because the ladder now spans three orders of magnitude:
+        megahertz at the wide end, kilohertz through the middle, and hertz once
+        the window is narrower than a filter -- at the deepest step and the
+        lowest rate that is 244 Hz, which "0 kHz" would have called nothing.
+        """
         span = float(self.settings.sample_rate) / max(1, self._zoom)
-        self.lbl_zoom.setText(f"{span/1e3:,.0f} kHz" if span < 1e6
-                              else f"{span/1e6:g} MHz")
+        if span >= 1e6:
+            text = f"{span/1e6:g} MHz"
+        elif span >= 1e4:
+            text = f"{span/1e3:,.0f} kHz"
+        elif span >= 1e3:
+            text = f"{span/1e3:.2f} kHz"
+        else:
+            text = f"{span:.0f} Hz"
+        self.lbl_zoom.setText(text)
 
     def _zoom_changed(self, *_):
         self._zoom = int(self.cmb_zoom.currentData())
@@ -2684,6 +3138,7 @@ class MainWindow(QMainWindow):
     def _ft8_mode(self, on: bool):
         """Entering or leaving FT8: show the strip, set the radio up, arm."""
         self.ft8_panel.setVisible(on)
+        self._update_floor()        # the strip is part of the window's height
         if not on:
             self._ft8_timer.stop()
             self.spotter.disarm()
@@ -2869,8 +3324,12 @@ class MainWindow(QMainWindow):
         text = "   ".join(bits)
         if text != self.lbl_ft8.text():
             self.lbl_ft8.setText(text)
+        # The colour follows what the readout is saying, so it is not in the
+        # theme's tint list: an error is the theme's error colour, and a
+        # healthy clock its accent.  _recolour puts this back by hand.
         self.lbl_ft8.setStyleSheet(
-            "color:#ffb0a0" if st["error"] else "color:#8fd8f0")
+            "color:" + (self.theme["error"] if st["error"]
+                        else self.theme["accent"]))
         self.lbl_ft8.setToolTip(self._ft8_status_text
                                 or "Slot clock, decoder state, and totals")
 

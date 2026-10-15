@@ -8,12 +8,14 @@
     python3 -m rspsdr --reset-settings
                                       # open on the built-in defaults, having
                                       # cleared what the window remembered
+    python3 -m rspsdr --theme amber   # open in one of the colour schemes
     python3 -m rspsdr --ft8 --freq 14074000 --duration 60
                                       # decode FT8 headless, printing it
 
 The window remembers everything between runs (see ``prefs``): the frequency,
 mode, filter, gains, volume, noise reduction, waterfall colours and levels,
-zoom, FT8 band and the window's own size and place are written when they change
+zoom, FT8 band, the colour scheme, whether the controls below the waterfall are
+folded away, and the window's own size and place are written when they change
 and read back at the next start.  A headless command (``--selftest``, ``--wav``,
 ``--ft8``, ``--save-memory``) deliberately does *not* read them: a script has to
 be able to depend on the same result every time, whatever the window last saved.
@@ -28,6 +30,7 @@ import threading
 import time
 
 from . import __version__
+from . import theme
 import wave
 
 import numpy as np
@@ -74,6 +77,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--reset-settings", action="store_true",
                    help="forget everything the window remembered about the last "
                         "run and open on the built-in defaults")
+    p.add_argument("--theme", default=None, choices=list(theme.names()),
+                   help="window colour scheme (" +
+                        ", ".join(theme.names()) +
+                        "); the default is the scheme last used")
     p.add_argument("--screenshot", metavar="FILE",
                    help="start the GUI, save a picture of its own window, exit")
     p.add_argument("--screenshot-delay", type=float, default=10.0,
@@ -147,6 +154,9 @@ def cmd_check(args) -> int:
                                    spec) is not None)
         print(f"remembered settings    : {known}/{len(prefsmod.RADIO_FIELDS)} "
               f"receiver fields ({store.path})")
+        scheme = store.value("ui", "theme", "choice", tuple(theme.names()),
+                             theme.DEFAULT)
+        print(f"window theme           : {scheme} (of {theme.describe()})")
     except Exception as exc:
         print(f"remembered settings    : unavailable ({exc})")
 
@@ -551,8 +561,12 @@ def main(argv=None) -> int:
     store = open_prefs(args)
     if store is not None and args.reset_settings:
         print(f"remembered settings cleared: {store.path}")
-    win = MainWindow(_make_settings(args, store, _typed_options(argv)),
-                     prefs_store=store)
+    given = _typed_options(argv)
+    # Only a --theme that was actually typed beats the remembered scheme: not
+    # typing one has to leave the user's own choice alone, which is the same
+    # rule the receiver settings follow (see CLI_OVERRIDES).
+    win = MainWindow(_make_settings(args, store, given), prefs_store=store,
+                     theme_name=args.theme if "theme" in given else None)
     win.show()
     # An app whose only job is to listen should already be listening.
     QTimer.singleShot(0, win.autostart)

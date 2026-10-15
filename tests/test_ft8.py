@@ -782,12 +782,17 @@ try:
     win._ft8_clear()
 
     # The strip takes height from the plots, and the window may be as small as
-    # 780x560 -- where the wrapped control rows have already left the plots
-    # about 55 px each.  The strip yields to them: the list shortens to three
-    # rows and each plot gives up 21 px (measured), which is the price of
-    # having the decoder on a window this small at all.
+    # its floor -- which, with the controls below the picture unfolded, is what
+    # those rows need rather than a fixed 780x560 (see `_update_floor`).
+    # Both measurements are therefore taken *at* that floor: the window is put
+    # back to it with the strip hidden, so what is compared is the strip's cost
+    # and not whatever height the window happened to be left at.  The strip is
+    # never cut off at the bottom edge -- the floor grows to hold it -- and the
+    # plots keep their own floor, so at this size it costs them nothing.
     win.resize(win.minimumWidth(), win.minimumHeight())
     win.mode_buttons["lsb"].click()
+    app.processEvents()
+    win.resize(win.minimumWidth(), win.minimumHeight())
     app.processEvents()
     without = (win.spectrum.height(), win.waterfall.height())
     win.mode_buttons["ft8"].click()
