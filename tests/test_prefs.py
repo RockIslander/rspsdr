@@ -312,11 +312,17 @@ win.chk_ft8every.setChecked(False)
 win.spn_sref.setValue(-60.5)
 win.chk_speak.setChecked(False)
 win.cmb_sface.setCurrentIndex(win.cmb_sface.findData("cream"))
+# The band plan over the picture, turned off: some listeners want the whole
+# plot for the signal, and the switch is remembered like the rest.
+win.chk_bands.setChecked(False)
+check("the one switch takes the band plan off both plots",
+      not win.spectrum.band_markers.isVisible()
+      and not win.waterfall.band_markers.isVisible())
 check("the meter takes the calibration, the peak switch and the face",
-      (win.smeter.ref_dbfs, win.smeter.peak_on, win.smeter.face)
+      (win.meter.ref_dbfs, win.meter.peak_on, win.meter.face)
       == (-60.5, False, "cream"),
-      f"S9 at {win.smeter.ref_dbfs} dBFS, peak {win.smeter.peak_on}, "
-      f"face {win.smeter.face}")
+      f"S9 at {win.meter.ref_dbfs} dBFS, peak {win.meter.peak_on}, "
+      f"face {win.meter.face}")
 # The window's own look: a colour scheme, and the controls under the picture
 # folded away to give the waterfall their height.
 win.cmb_theme.setCurrentIndex(win.cmb_theme.findData("amber"))
@@ -380,10 +386,11 @@ check("the window's own controls are in the file too",
       (ui["step"], ui["zoom"], ui["wf_auto"], ui["wf_floor"], ui["wf_ceiling"],
        ui["wf_contrast"], ui["wf_cmap"], ui["wf_reverse"], ui["wf_detail"],
        ui["ft8_band"], ui["ft8_every"], ui["s_meter_ref"],
-       ui["s_meter_peak"], ui["s_meter_face"], ui["theme"],
+       ui["s_meter_peak"], ui["s_meter_face"], ui["band_markers"], ui["theme"],
        ui["settings_folded"], ui["split_spectrum"], ui["split_waterfall"])
       == (10, 4, False, -115.0, -45.0, 52.0, "viridis", True, watch, "20m",
-          False, -60.5, False, "cream", "amber", True, split[0], split[1]),
+          False, -60.5, False, "cream", False, "amber", True, split[0],
+          split[1]),
       json.dumps(ui))
 check("the window's own size and place are written down",
       (saved["window"]["x"], saved["window"]["y"], saved["window"]["w"],
@@ -434,6 +441,7 @@ restored = [
     ("the meter's S9 calibration", reopened.spn_sref.value(), -60.5),
     ("the meter's peak marker", reopened.chk_speak.isChecked(), False),
     ("the meter's face", reopened.cmb_sface.currentData(), "cream"),
+    ("the band markers", reopened.chk_bands.isChecked(), False),
     ("the colour scheme", reopened.theme_name, "amber"),
     ("the controls folded away", reopened.settings_pane.is_folded(), True),
 ]
@@ -443,10 +451,10 @@ check(f"all {len(restored)} controls come back as they were left", not wrong,
       "; ".join(wrong))
 
 check("... and the meter itself is set up that way again, not just the boxes",
-      (reopened.smeter.ref_dbfs, reopened.smeter.peak_on, reopened.smeter.face)
+      (reopened.meter.ref_dbfs, reopened.meter.peak_on, reopened.meter.face)
       == (-60.5, False, "cream"),
-      f"S9 at {reopened.smeter.ref_dbfs} dBFS, peak {reopened.smeter.peak_on}, "
-      f"face {reopened.smeter.face}")
+      f"S9 at {reopened.meter.ref_dbfs} dBFS, peak {reopened.meter.peak_on}, "
+      f"face {reopened.meter.face}")
 # Not just the box that says "amber": the scheme has to be on the window, and
 # folding has to have come back with it -- which is the difference between the
 # window opening small and opening with a floor to suit the controls it shows.
@@ -462,18 +470,33 @@ check("... and the scheme is on the window, not only in its combo box",
 check("... and folding came back with it, so the window may be small again",
       reopened.settings_pane.is_folded()
       and not reopened.settings_pane.body.isVisible()
-      and reopened.minimumHeight() == ui_mod.FOLDED_MIN_HEIGHT,
+      and reopened.minimumHeight() >= ui_mod.FOLDED_MIN_HEIGHT,
       f"folded {reopened.settings_pane.is_folded()}, shortest height "
-      f"{reopened.minimumHeight()} px (folded floor "
+      f"{reopened.minimumHeight()} px (never under "
       f"{ui_mod.FOLDED_MIN_HEIGHT})")
+# ... and the floor that came back with it is the folded rows' own, not the whole
+# window's: the same window with its pane on show has to ask for more.  Asked on
+# a window of its own, so that measuring one floor cannot disturb the state the
+# rest of this file is reading.
+twin = window(Settings(), store=prefs.PrefsStore(tmp_path("floors.json")))
+twin.settings_pane.set_folded(True)
+app.processEvents()
+folded_floor = twin.minimumHeight()
+twin.settings_pane.set_folded(False)
+app.processEvents()
+open_floor = twin.minimumHeight()
+twin.close()
+check("... and it is the folded rows that set it, not the rows the pane shows",
+      ui_mod.FOLDED_MIN_HEIGHT <= folded_floor < open_floor,
+      f"folded {folded_floor} px against {open_floor} px with the pane open")
 # The calibration is the whole of the meter's absolute accuracy, so the check
 # is the one that matters: the level it was calibrated at must come back as S9.
-reopened.smeter.feed(-60.5, 0.045)
+reopened.meter.feed(-60.5, 0.045)
 check("a level fed at the calibration reads S9, not S6.4",
-      abs(reopened.smeter.level_dbm() + 73.0) < 1e-9
-      and reopened.smeter.reading_text() == "S9 +0 dB",
-      f"-60.5 dBFS reads {reopened.smeter.level_dbm():.1f} dBm "
-      f"({reopened.smeter.reading_text()}); at the default calibration it "
+      abs(reopened.meter.level_dbm() + 73.0) < 1e-9
+      and reopened.meter.reading_text() == "S9 +0 dB",
+      f"-60.5 dBFS reads {reopened.meter.level_dbm():.1f} dBm "
+      f"({reopened.meter.reading_text()}); at the default calibration it "
       f"would read {ui_mod.smeter.reading(ui_mod.smeter.dbm_for_dbfs(-60.5))}")
 
 check("the window comes back the same size and in the same place",
@@ -489,7 +512,7 @@ check("the divider between the plots comes back where it was",
       list(reopened.split.sizes()) == saved_split
       and abs(saved_split[0] / sum(saved_split) - 180 / 640) < 0.02,
       f"the file says {saved_split}, the window has "
-      f"{list(reopened.split.sizes())}, the default is [300, 340]")
+      f"{list(reopened.split.sizes())}, the default is [160, 680]")
 
 # The borrowed settings belong to the mode, not to the file: leaving FT8 gives
 # them back, unless the user has taken one over in the meantime.
@@ -511,21 +534,25 @@ check("and the file follows the mode back out of FT8",
 
 # A window restored off the edge of every screen is worse than one that opens
 # in the middle: monitors are unplugged and resolutions change.
+# The size remembered here has to be one the window will take: the rows set a
+# floor (728 px on this 800 px screen, where the pane's rows have wrapped) and a
+# size below it is not one the window can come back to.  The whole screen is the
+# largest size it can have, and the one this check is about.
+screen_px = QApplication.primaryScreen().availableGeometry().height()
 wild = tmp_path("wild.json")
 w = prefs.PrefsStore(wild)
 w.put("window", "x", 30_000)
 w.put("window", "y", 30_000)
 w.put("window", "w", 790)
-# The unfolded window's floor is 659 px at this width, and a size the window
-# will not take is not one it can come back to.
-w.put("window", "h", 700)
+w.put("window", "h", screen_px)
 w.save()
 off = window(Settings(), store=w)
 check("a remembered position that is off every screen is ignored",
       off.x() < 20_000 and off.y() < 20_000, f"{off.x()},{off.y()}")
 check("... but the size, which is the window's own, is still used",
-      (off.width(), off.height()) == (790, 700),
-      f"{off.width()}x{off.height()}")
+      (off.width(), off.height()) == (790, screen_px),
+      f"{off.width()}x{off.height()} of a remembered 790x{screen_px}, "
+      f"floor {off.minimumHeight()}")
 off.close()
 
 # A rectangle remembered on a larger monitor must not open with its controls off
@@ -544,13 +571,13 @@ large.close()
 
 # A maximised window comes back maximised -- and the size to un-maximise to is
 # still the one the user chose, not the screen's.
+# Above the floor the rows set at this width (728 px on this screen): a size
+# the window will not take is not one it can come back to.
 mx = prefs.PrefsStore(tmp_path("max.json"))
 mx.put("window", "x", 60)
 mx.put("window", "y", 40)
 mx.put("window", "w", 790)
-# Above the floor the unfolded controls set at this width (659 px): a size the
-# window will not take is not one it can come back to.
-mx.put("window", "h", 700)
+mx.put("window", "h", screen_px)
 mx.put("window", "maximised", True)
 mx.save()
 big = window(Settings(), store=mx)
@@ -561,14 +588,15 @@ check("a window that was left maximised comes back maximised", big.isMaximized()
 big.close()
 again_w = json.load(open(tmp_path("max.json")))["window"]
 check("... and the size to un-maximise to is still the one the user chose",
-      (again_w["w"], again_w["h"], again_w["maximised"]) == (790, 700, True),
+      (again_w["w"], again_w["h"], again_w["maximised"])
+      == (790, screen_px, True),
       json.dumps(again_w))
 plain_w = window(Settings(), store=w)
 plain_w.show()
 app.processEvents()
 check("a window that was left normal does not come back maximised",
       not plain_w.isMaximized()
-      and (plain_w.width(), plain_w.height()) == (790, 700),
+      and (plain_w.width(), plain_w.height()) == (790, screen_px),
       f"maximised={plain_w.isMaximized()} {plain_w.width()}x{plain_w.height()}")
 plain_w.close()
 

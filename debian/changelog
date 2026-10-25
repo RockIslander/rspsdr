@@ -17,25 +17,78 @@ rspsdr (1.4.0) unstable; urgency=medium
     drawn on, the marker, the peak trace, the passband wash and the grid above
     floors of their own -- and the grid quieter than the trace in every one of
     them.  A scheme that cannot be read now fails the run.
-  * The signal meter has moved to the top right of the display area, in the row
-    above the picture, with the same reading in figures printed beside it.  It
-    was in the gain row, among a dozen boxes, where the one instrument in the
-    window meant to be read at a glance was the hardest thing to find; it is
-    now where a transceiver puts it.  Its own setup -- the S9 calibration, the
-    peak marker and the face -- moved down with the rest of the settings.
-  * Everything below the picture -- theme, meter setup, gains, FFT size,
-    waterfall levels, colour, detail and zoom -- is now one pane that folds
-    away (the button at its top left, or Ctrl+H), and folding hands the rows'
-    height to the picture: at 1360x739 the two plots go from 275 px together to
-    369, so the waterfall gains 94 px of screen it did not have.  The state is
+  * The signal meter is one bar across the row above the picture, and the
+    analogue needle meter is gone.  The needle was an instrument to *look at*
+    rather than glance at, and it cost 222 px of the window's height -- a sixth
+    of a 1360x768 screen -- to say what a 38 px strip says: the same IARU
+    scale, drawn from one table of marks in the printed-dial convention (evenly
+    spaced by mark, S1 to S9 in the first three fifths of the strip), with the
+    same quasi-peak ballistics, the same peak marker and the same two faces.
+    A bar is read by its length, so it takes the whole width of the row instead
+    of the 472 px the dial's glass used to pin down, and the exact figure is
+    still printed beside it -- for the levels that fall between two marks, which
+    is every level that is not exactly on one.
+  * The window above the picture is one line of controls per row of the job,
+    because a wrapped row is two lines tall and that height is the picture's.
+    The device label moved to the status bar, where "no SDR found" is no less
+    visible and the 211 px string costs no row; the sample rate and the Centre
+    box moved to the receiver's own settings (the hardware's centre is not the
+    operator's dial); and the CW pitch, the audio AGC and the "Clear peak"
+    button moved into the settings pane, which costs the waterfall nothing while
+    it is folded.  Measured at 1280x728: the waterfall gets 304 px of history
+    with the settings on show and 386 with them folded, where the needle meter
+    and a duplicated frequency scale had left it 152.
+  * The picture's shares are the waterfall's, and the frequency scale is drawn
+    once.  The waterfall used to carry a second copy of the spectrum's scale --
+    42 px of ruler a couple of hundred pixels below the first -- and that strip
+    is 42 rows of history now.  The spectrum, being the tuning aid, yields first
+    when the picture is short and stops at 200 px in a tall window, so what the
+    divider really decides is how quickly the waterfall takes the rest; the
+    default is one part tuning aid to four of history.  The waterfall's history
+    ceiling went from 600 rows to 1200, because a maximised window on a 1440 px
+    screen asks it for about that many and stopping short of it would stretch
+    the picture rather than save it.
+  * The amateur and shortwave band plan is drawn over both halves of the
+    picture: a dashed rule at each band edge and the band's name along the top
+    of the spectrum and of the waterfall, for every band in view.  It is one
+    item per plot, painted in the plot's own pixels rather than a line in
+    frequency space, so the names stay upright and one size at every zoom and
+    the spectrum's moving dB axis never has to repaint them.  A band too narrow
+    on screen to name keeps its edges and loses only the label, and two names
+    that would collide are dropped rather than drawn over the band next door.
+    One switch in the settings, Band markers, takes them off both plots and is
+    remembered.  tests/test_units.py checks which bands a window shows (both of
+    two overlapping bands, none between bands, a band ending exactly at the
+    edge), and tests/test_prefs.py round-trips the switch and requires it to
+    reach both plots.
+  * The tuned frequency is set in 28 pt, up from 20: it is the one number in
+    this window read from across the room, and its box is wide enough for the
+    whole of it, because the last digit of a frequency is what a narrow box
+    loses.
+  * Everything below the picture -- theme, meter setup, the receiver's own
+    settings and its centre, CW pitch, audio AGC, gains, FFT size, waterfall
+    levels, colour, detail and zoom, and clearing the spectrum's peak trace --
+    is one pane that folds away (the button at its top left, or Ctrl+H), and
+    folding hands the rows' height to the picture: at 1280x728 the picture goes
+    from 389 px to 482, so folding buys 93 px of waterfall.  The state is
     remembered, so a window left folded opens folded.
-  * The window's shortest height now follows what it is showing.  With the
-    pane folded it can be 780x560 as before; with the rows on show it refuses
-    to be shorter than they are (659 px at the narrowest width), because Qt
-    would otherwise squeeze the picture to nothing and then cut the rows off at
-    the bottom edge -- measured before the fix: the +/-/Fit zoom buttons 18 px
-    below the bottom of the window, visible according to Qt and reachable
-    according to nobody.
+  * The window's shortest height follows what it is showing, folded or not: the
+    rows that are on show plus PLOT_MIN_HEIGHT for the picture, because Qt would
+    otherwise squeeze the picture down to nothing and then cut the rows off at
+    the bottom edge, where nothing says that the zoom buttons are down there at
+    all.  Folded, that height used to be answered with a constant (780x560),
+    which stopped being true once the rows wrapped: the folded rows come to
+    535 px with the picture's own 220 at the narrowest width, and a floor below
+    what the rows need lays one row over another.  So the 560 px constant is only the lower bound it was
+    always meant to be, and the meter's row is fixed at its own height (38 px,
+    where the dial and its bar were 222) so that the squeeze lands on the
+    picture, which is the one thing here that still looks like itself when it is
+    short.  PLOT_MIN_HEIGHT is now the two plots' own minimums added up (80 px
+    of spectrum and 140 of waterfall) rather than a number of its own, so the
+    splitter cannot be asked for less than what is inside it.  Measured after:
+    the floor with the rows on show is 728 px at the narrowest width -- inside a
+    1360x768 screen with its frame, where it used to want 795 -- and 560 px
+    folded at the width the window opens at.
   * tests/test_units.py: every scheme complete, every colour a #rrggbb that
     parses, the readability ratios above, and the style sheet built from each
     one balanced, fully filled in, naming every colour the controls use, and
@@ -45,15 +98,33 @@ rspsdr (1.4.0) unstable; urgency=medium
     settings.json and come back -- with the scheme on the plots rather than
     only in the combo box that names it, and a folded window opening folded and
     small again.  Twenty-five controls now round-trip.
-  * tests/gui_smoke.py: the meter's placement is checked as geometry (top
-    right, above the spectrum and so above the waterfall); the rows below the
-    picture are one pane whose folding really does give its height to the
-    picture (the pane shrinks, the plots grow by what it gave up, the top of
-    the picture does not move, the waterfall's history gains rows), the fold
-    button stays on screen when everything else is put away, Ctrl+H does the
-    same, and the window will not shrink past the rows it is showing while the
-    folded window still reaches 780x560.  Every scheme is walked and required
-    to reach the plots, the stroked labels and the application's style sheet.
+  * tests/gui_smoke.py: the window has one meter and it is the bar (found by
+    class, so a second one beside a dial cannot creep back in); it is a strip in
+    the row above the picture; and it is the *width of that row*, which is the
+    point of giving it the row -- the window is made narrower and wider again and
+    the bar has to give the pixels up and take them back.  Its own pixels are
+    read back against the scale: the light ends where the scale puts S1, S5, S9
+    and S9+40; nothing is lit with the radio stopped; the peak marker holds the
+    level the fill has left behind and goes when the switch does; and both faces
+    take the fill.  The picture is one row of history per pixel of plot height,
+    asked the harshest way -- park the spectrum at its floor and then at its
+    ceiling and require the rows to change by exactly what the tuning aid took.
+    The rows below the picture are one pane whose folding really does give its
+    height to the picture (the pane shrinks, the plots grow by what it gave up,
+    the top of the picture does not move, the waterfall's history gains rows),
+    the fold button stays on screen when everything else is put away, Ctrl+H
+    does the same, and the window will not shrink past the rows it is showing,
+    folded or not -- with the meter, its readout and the tuned frequency asked
+    about by name.  Every scheme is walked and required to reach the plots, the
+    stroked labels and the application's style sheet.
+  * tests/test_units.py, the bar: it is the scale itself, mark for mark; the
+    ends of the scale are the ends of the strip; the marks are laid out evenly
+    along it, as a printed dial's are; every mark fills to exactly where it is
+    drawn; a level between two marks fills between them rather than to either;
+    it is monotonic and stops at both ends; it resolves 3 dB in the S region and
+    5 dB above; a level is a pixel between the ends of the trough it is given;
+    and its trough, numbers and glass fit inside its own 38 px -- arithmetic, so
+    it runs with no radio and no display.
   * The zoom ladder runs to 256x instead of 16x -- nine doubling steps, and at
     2 MSps a 7.8 kHz window (244 Hz at the lowest sample rate) where the old
     top of the ladder showed 125 kHz.  It stops where the arithmetic stops: the
@@ -71,8 +142,10 @@ rspsdr (1.4.0) unstable; urgency=medium
     smallest transform on offer, and the window still a real width at the
     lowest sample rate, so the readout cannot come out as "0 Hz".
   * README: the schemes, what folding the controls away buys, why the
-    window's floor depends on what it is showing, and where the zoom ladder
-    stops.
+    window's floor depends on what it is showing, where the zoom ladder
+    stops, and which controls sit above the picture and which are settings --
+    with what the waterfall gets, in history rows, at the size the window
+    opens at.
 
  -- RockIslander <174265838+RockIslander@users.noreply.github.com>  Wed, 14 Oct 2026 20:55:00 -0230
 

@@ -122,7 +122,7 @@ The radio starts automatically when the window opens.
 | `◀` `▶` buttons, or the dial box itself | step / type a frequency |
 | **Jump to band…** | 160 m … 6 m, and every shortwave metre band |
 | **Presets…** | WWV/CHU time signals, FT8 & WSPR calling frequencies, broadcasts |
-| **Centre** box | move the received window without changing where you listen |
+| **Centre** box, in Settings | move the received window without changing where you listen |
 
 Clicking or tuning near the edge of the window re-centres the receiver
 automatically, so the signal you are listening to stays on screen. The limit is
@@ -137,6 +137,14 @@ can shift the frequency out from under the hand. A click or drag reads its
 frequency from the scale the picture is drawn against, so it lands on the
 frequency the labels show.
 
+**Band markers** — the band plan is drawn where you tune it: a dashed rule at
+each amateur and shortwave band edge on both the spectrum and the waterfall,
+and the band's name along the top of each, so a carrier is where it is *and*
+inside 40 m. The markers follow the zoom and are only drawn for bands in view;
+a band too narrow on screen to name is left as its two edges rather than given
+a label that would sit over the band next door. **Band markers** in the
+settings pane turns them off, and is remembered.
+
 **Mode and filter** — `AM` (envelope), `SAM` (synchronous, holds up much better
 on a fading shortwave signal), `USB`, `LSB`, `CW` (with adjustable pitch), and
 `NFM`. Choosing a mode picks a sensible filter width; override it with the
@@ -150,24 +158,35 @@ you pick.
 (20–59 dB) is the main control; use the least gain that still lifts the noise
 floor off the bottom of the waterfall. **RF gain** (0–3) trades sensitivity for
 overload immunity. **Tuner BW** sets the analogue filter; *Auto* tracks the
-sample rate.
+sample rate. They are in the settings pane with the rest of the receiver's own
+settings — the sample rate, the Centre box and the FFT — rather than among the
+controls the hand is on while listening.
 
-**The signal meter** — the analogue S-meter in the top right corner, above the
-picture: a needle over a printed dial, S1 to S9 and then +20/+40/+60 dB, drawn
-either in the dark face of the later radios or the cream one of the older
-analogue sets (**Face**). It sits in the corner of the display because it is the
-one instrument here meant to be read at a glance rather than looked at, which is
-where a transceiver puts it too; the same reading in figures is printed beside
-it for the moments when the needle is between two marks, and its own controls —
-the calibration, the peak marker and the face — are with the rest of the
-settings below the picture.
+**The signal meter** — one meter, and it is a bar. It runs the whole width of
+the row above the picture, with the scale printed across it — S1 to S9 and then
++20/+40/+60 dB — and the same reading in figures at its right-hand end: for the
+levels that fall between two marks, which is every level that is not exactly on
+one. There is no separate clock or gauge to read it beside; the figures are the
+exact figure and the bar is the glance.
+It used to be an analogue S-meter — a needle over a printed dial — with this bar
+under it as a second view of the same number. The needle is gone: it is an
+instrument you have to *look at*, and it cost 222 px of the window's height to
+say what 38 px says. Those pixels are the waterfall's now, which is the whole
+point of the change. What is left is painted from one table of marks, the same
+printed-dial convention a face uses — evenly spaced *by mark* rather than linear
+in dB, S1 to S9 in the first three fifths of the strip and the 10 dB steps above
+them in the rest, so the top of the scale is compressed the way a printed dial
+is. It wears the face of the later radios, or the cream one of the older
+analogue sets (**Face**), and it carries the peak marker.
 The scale is the IARU recommendation — S9 is −73 dBm, i.e. 50 µV into 50 Ω at
-the antenna socket, and each S unit below it is 6 dB — and the needle has the
+the antenna socket, and each S unit below it is 6 dB — and the bar has the
 recommended quasi-peak ballistics: up in about 10 ms, down with a 500 ms time
 constant, with a **Peak** marker holding the highest level for half a second so
-a signal that comes and goes between two repaints is not missed. The exact
-figure is printed beside the face as well ("S9 +20 dB   −53 dBm
-−25.0 dBFS"), because a needle can only be read to its own marks.
+a signal that comes and goes between two repaints is not missed. A bar can only
+be read to the distance between two of its marks (3 dB below S9, 5 dB above),
+which is why the exact figure is printed beside it ("S9 +20 dB   −53 dBm
+−25.0 dBFS"). Its own controls — the calibration, the peak marker and the face —
+are with the rest of the settings below the picture.
 
 It measures the level *inside the filter you are listening to*, taken before the
 audio AGC, the noise reduction, the squelch and the volume. So it does not
@@ -175,7 +194,7 @@ follow the volume control, it does not care how hard the NR is working, and it
 still shows a signal you cannot hear because the squelch is shut — measured, the
 level it reads is bit-for-bit the same with the volume at 2 % as at full, and a
 receiver that is silent because the squelch closed reads its signal as ever. A
-carrier 18 kHz away moves the status bar's level but not the needle (15.7 dB
+carrier 18 kHz away moves the status bar's level but not the meter (15.7 dB
 against 0.00 dB in the chain test). What it will *not* do is pretend to an
 absolute accuracy the hardware has not got: the level comes from the ADC after
 the gain stages, so a dBFS figure means nothing until something known is
@@ -183,7 +202,7 @@ attached, and the meter asks for that one number as **S9 at** — the dBFS
 reading that is to count as S9. The default comes from measurements on a real
 RSP1 (2 MSps, 6 kHz AM, the default IF gain of 40 dB): a whole band of HF noise
 reads S6.7 on 31 m, S6.2 on 41 m and S5.3 on 19 m, and a 10 dB change of gain
-moves the needle by exactly 10 dB (measured at 9.805 MHz: −71.9 dBFS with the
+moves the bar by exactly 10 dB (measured at 9.805 MHz: −71.9 dBFS with the
 IF gain box at 50, −61.9 at 40), which is what makes one calibration hold
 wherever the gain is left. The low end of the scale is the calibration's
 business rather than the hardware's: S1 is −121 dBm, under this receiver's own
@@ -191,8 +210,8 @@ noise floor even at its lowest gain, where the noise still reads S3.8. Attach a
 signal generator, or tune something of known strength and read what `--selftest`
 says it is, set
 **S9 at** to that and the whole scale follows — including the reading the
-headless report prints. Switching the receiver off drops the needle
-back to its rest rather than leaving it standing at the last signal, so a frozen
+headless report prints. Switching the receiver off empties the bar
+rather than leaving it lit at the last signal, so a frozen
 reading can never be mistaken for a station still being heard.
 
 **The look of the window** — five colour schemes (**Theme**): *Night*, the
@@ -205,18 +224,42 @@ grid and the passband wash, so a scheme is a name rather than a dozen hex values
 scattered through two files. `--theme` opens in one without waiting to be
 chosen, and the one you last chose is remembered.
 
-**The controls fold away.** Everything below the picture — the look, the gains,
-the FFT, the waterfall's levels, colour, detail and zoom — is one pane with a
-**▾ Settings** button at its top left. Folding it (the button, or `Ctrl+H`)
-hides those rows and hands their height to the picture: at 1360x739 the two
-plots go from 275 px together to 369, which is 94 px of waterfall that was not
-on screen before. The state is remembered with everything else, so a window left
-with the controls put away opens that way. While they *are* on show the window
-will not be made shorter than they are — at its narrowest the floor is around
-660 px — because Qt would otherwise squeeze the picture to nothing and then cut
-the rows off at the bottom edge, with nothing on screen to say that the zoom
-buttons were down there. Fold the pane and the window can be 780x560 again,
-which is what makes the whole thing usable on a small screen.
+**The waterfall is what the window is for.** Everything above it is one line of
+controls per row of the job — the device and what it is doing, the dial and the
+band, the mode and how it sounds, the memory channels, and the meter — and a row
+that wraps is two lines tall, so the rows are kept to one line each at any
+width the window will take. The dial is set in 28 pt type, the largest in the
+window; everything set once and then left alone (the sample rate, the hardware
+centre, the gains, the FFT, the FFT's size, the colour scheme, the CW pitch,
+the audio AGC, the meter's own setup) is in the settings pane below the picture
+instead, where it costs the waterfall nothing once the pane is folded.
+The picture itself is divided by a splitter whose divider you can drag, and the
+shares favour the history: the spectrum — the tuning aid — stops at 200 px in a
+very tall window and yields to the waterfall first in a short one, so what the
+divider really decides is how quickly the waterfall takes the rest. The
+frequency scale is drawn once, under the spectrum; the waterfall used to carry a
+second copy of it, 42 px of ruler a couple of hundred pixels below the first,
+and that strip is 42 rows of history now. At 1360x768 the window opens at
+1280x728, and the waterfall gets 304 px of history with the settings on show and
+386 with them folded — where, before all of this, the needle meter and the
+second frequency scale left it 152.
+
+**The controls fold away.** Everything below the picture — the settings, and
+the FT8 strip with them when it is up — is one pane with a **▾ Settings** button
+at its top left. Folding it (the button, or `Ctrl+H`) hides those rows and hands
+their height to the picture: at 1280x728 the picture goes from 389 px to 482,
+which is 93 px of waterfall that was not on screen before. The state is
+remembered with everything else, so a window left with the controls put away
+opens that way.
+While they *are* on show the window will not be made shorter than the rows are —
+728 px at its narrowest, because that is where the wrapped rows and the picture's
+own 220 px come to — since Qt would otherwise squeeze the picture to nothing and
+then cut the rows off at the bottom edge, with nothing on screen to say that the
+zoom buttons were down there. The meter is counted like any other row, so the
+squeeze lands on the picture rather than on the glass. Folding the pane drops
+the floor to the rows that are left plus the picture's own 220 px — the folded
+rows come to 443 px at 1280 wide and 535 at 780 — and the floor is never below
+560, so the whole thing stays usable on a small screen.
 
 **Audio** — volume, mute, an audio AGC (worth leaving on for shortwave), and a
 squelch in dB.
@@ -361,9 +404,10 @@ different span and no longer mean what the colour scale says.
 
 The window opens at a size that fits the display, and its control rows wrap, so
 it can be shrunk or maximised on a screen that is narrower than the controls
-would otherwise demand. With the FT8 strip up, the decode list shortens from six
-rows to three as the window approaches its smallest size, so the plots keep
-their room: at 780×560 the strip costs each plot 21 px, measured.
+would otherwise demand. With the FT8 strip up the window needs 164 px more than
+without it — measured at 780 wide — and the decode list itself shortens from six
+rows to three (its minimum) when the window cannot be that tall, so the picture
+keeps the room it is promised.
 
 ## Command line
 
@@ -541,22 +585,32 @@ required to stay quieter than the trace — and the style sheet built from each
 one balanced and fully filled in), and the signal meter's scale — S9 at
 −73 dBm, 6 dB per unit, the standard's 10 dB steps above it, and the readings
 an operator would
-say — plus its dial (evenly spaced marks, every mark pointing where it is drawn,
-a level round-tripping through the needle to within half a mark, the arc
-monotonic across its whole range) and the needle's ballistics (63 % of a step in
+say — plus its bar (the marks laid out evenly as a printed dial's are, every mark
+filled to exactly where it is drawn, a level between two marks filled between
+them, the fill monotonic and stopping at either end, half a mark resolved in the
+S region and half a 10 dB step above it, and the pixel a level comes to sitting
+between the ends of the trough it is given) and its ballistics (63 % of a step in
 one attack time, the decay no faster than its constant, a half-second hold, and
-the peak never below the needle).
+the peak never below the fill).
 
 `tests/test_chain.py` drives `Radio._process_frame` — the function the streaming
 thread calls — with synthetic IQ, so the whole path runs with no hardware
 attached: every sample rate against several FFT sizes, the carrier's bin in the
 spectrum, every demodulator mode recovering the tone it should, frames surviving
 a change of sample rate, and the level meter agreeing with the spectrum. The
-level the needle reads has its own section: 6.02 dB for every halving of the
+level the meter reads has its own section: 6.02 dB for every halving of the
 carrier, one S unit per halving either side of S9, the same level with the noise
 reduction on, the audio AGC on, the volume at 2 % and the squelch shut (silent
 audio, and it still reads the signal), and a carrier 18 kHz away moving the
 baseband level by 15.7 dB while the meter reads its own passband unchanged.
+`tests/gui_smoke.py` is where the window's shape is checked: that the meter is
+one widget and not two, that it is the width of the row it is in (a bar is read
+by its length, so it grows with the window and gives the width back when it
+shrinks), that the light ends where the scale puts S1, S5, S9 and S9+40, that
+nothing is lit with the radio stopped, and that the picture is one row of
+history per pixel of plot height — asked by parking the spectrum at its floor and
+then at its ceiling and requiring the rows to change by exactly what the tuning
+aid took.
 
 `tests/test_startup.py` covers starting up with no radio at all, which is the
 one case the hardware suites cannot produce: it stands in for the SoapySDR
@@ -649,18 +703,28 @@ range and the plot rectangle rather than from the plot's own transform — and
 drags a real mouse event across the waterfall to check that the receiver centre
 stays put while the button is down, that the tuning follows the pointer, and
 that the window follows the dial only once the button is up. It paints the
-signal meter with known levels and reads the pixels back: the red needle has to
-be where the dial geometry puts its tip, either side of centre, and the
-half-second peak marker has to still be holding a signal the needle has left
-behind — with both faces drawn and a switch between them changing the picture. It
-checks where the meter *is*, as geometry: in the top right, above the spectrum
-and so above the waterfall. It checks the rows below the picture are one pane
-whose folding really does hand their height to the picture — the pane shrinks,
-the picture grows by what it gave up, the top of the picture does not move and
-the waterfall's own history gains rows — that the fold button stays on screen
-when everything else here is put away, that `Ctrl+H` folds and unfolds it too,
-and that while those rows are shown the window refuses to shrink past them while
-the folded window still reaches 780x560. It walks every colour scheme and
+signal meter with known levels and reads the pixels back: the light has to end
+where the scale puts S1, S5, S9 and S9+40, the strip has to be dark from end to
+end with the radio stopped, the half-second peak marker has to still be holding
+a signal the fill has left behind, and both faces have to take the fill. It
+checks where the meter *is*, as geometry: a strip across the row above the
+picture, and the width *of that row* rather than a fixed 472 px of glass — the
+window is made narrower and wider again and the bar has to give the pixels up
+and take them back. It requires there to be one meter in the window and not two,
+found by class, so a dial cannot creep back in beside it. The picture is held to
+one row of history per pixel of plot height the harshest way there is: the
+spectrum is parked at its floor and then at its ceiling, and the rows have to
+change by exactly what the tuning aid took. The tuned frequency is required to be
+the largest type in the window, with the whole of its reading inside its box,
+because the last digit of a frequency is the thing a narrow box loses. It checks
+the rows below the picture are one pane whose folding really does hand their
+height to the picture — the pane shrinks, the picture grows by what it gave up,
+the top of the picture does not move and the waterfall's own history gains rows —
+that the fold button stays on screen when everything else here is put away, that
+`Ctrl+H` folds and unfolds it too, and that the window refuses to shrink past the
+rows it is showing, folded or unfolded: the meter, the reading beside it and the
+tuned frequency are asked about by name, because those are the things that must
+never be squeezed out of the window. It walks every colour scheme and
 requires each to reach the plots, the stroked labels and the application's own
 style sheet, not just the combo box that names it. It
 also checks the window itself: that

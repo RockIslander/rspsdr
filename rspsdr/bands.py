@@ -99,6 +99,21 @@ PRESETS: list[Preset] = [
 ]
 
 
+def bands_in_view(lo: float, hi: float) -> list[Band]:
+    """Every band that overlaps the window [lo, hi] Hz, lowest first.
+
+    Bands are marked where they are, not only where they start, so a window
+    that shows the top of 40 m and the bottom of 41 m gets both -- they do
+    overlap, and each is worth a name.  Ordering by the lower limit puts the
+    labels on the picture in the order the bands are read; on a tie the
+    wider band comes first, so the narrower one is the label that is dropped
+    when the two would collide.
+    """
+    found = [b for b in HAM_BANDS + SW_BANDS if b.low <= hi and b.high >= lo]
+    found.sort(key=lambda b: (b.low, -(b.high - b.low)))
+    return found
+
+
 def find_band(freq: float) -> Band | None:
     for b in HAM_BANDS:
         if b.low <= freq <= b.high:

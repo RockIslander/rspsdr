@@ -67,13 +67,14 @@ pg.setConfigOptions(useOpenGL=False, antialias=False)
 
 from PyQt6.QtCore import (QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt,
                           QTimer, pyqtSignal)
-from PyQt6.QtGui import (QBrush, QColor, QFont, QKeySequence, QLinearGradient,
-                         QPainter, QPainterPath, QPalette, QPen, QShortcut)
+from PyQt6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QKeySequence,
+                         QLinearGradient, QPainter, QPainterPath, QPalette,
+                         QPen, QShortcut)
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout,
     QHeaderView, QInputDialog, QLabel, QLayout, QMainWindow, QMessageBox,
-    QPushButton, QSlider, QSplitter, QTableWidget, QTableWidgetItem,
-    QVBoxLayout, QWidget,
+    QPushButton, QSizePolicy, QSlider, QSplitter, QTableWidget,
+    QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from . import bands, ft8, logo, prefs, smeter, theme
@@ -170,9 +171,16 @@ PLOT_AXIS_WIDTH = 62
 # rasteriser -- and these bound how far that can go.  WF_ROWS is both the
 # starting size and the answer when the plot's height cannot be known yet; the
 # bounds keep a very tall window from turning into millions of pixels a frame.
+#
+# The ceiling is high on purpose.  The waterfall is the point of the window and
+# now takes some four fifths of the picture, so a maximised window on a 1440 px
+# screen asks it for about 1200 rows: stopping short of that would not save the
+# history, it would *stretch* it, drawing 600 rows over 1200 pixels with the
+# smoothing on.  At the default "Screen" detail a 1200-row picture is 5.8 MB,
+# and one frame still only colourises the new row and shifts the rest.
 WF_ROWS = 240
 WF_MIN_ROWS = 120
-WF_MAX_ROWS = 600
+WF_MAX_ROWS = 1200
 
 # Displayed spectrum is max-pooled down to one point per pixel of the trace's
 # own width, and to this many when that width is not known yet.  Max (not mean)
@@ -225,9 +233,37 @@ WF_BLANK_DB = -200.0
 #     under the bottom edge at 780x560 with the pane open).  The floor is
 #     therefore the rows' own height-for-width at the width the window has,
 #     plus PLOT_MIN_HEIGHT for the picture.  See MainWindow._update_floor.
+#
+# A floor taller than the screen is a window whose bottom is off it -- the status
+# bar, and the cursor readout with it -- so the rows and the picture are priced
+# against the screen this is written for, 1360x768.  Measured there, with the
+# needle meter gone and the rows at one line each: the window opens at 1280x728,
+# frame 754 inside the 768, with 389 px of picture -- 80 px of spectrum and
+# 306 of waterfall, 304 rows of history -- and folding the settings pane away
+# hands the waterfall 93 px more (386 rows).  The floor with the rows on show is
+# 728 px at the 780 px width floor, where they wrap, and the rows themselves ask
+# for 536 px at the width the window opens at, so the constant below is what
+# applies there.  Both are inside the screen.
 MIN_WIDTH = 780
+# The smallest a window may ever be, whatever the rows would allow.  It is not
+# the whole answer for a window whose rows wrap -- see _update_floor: the rows
+# that are on show are counted there like any others, and at the narrowest width
+# the folded ones come to 535 px with the picture's own 220, so this is a bound
+# as well as an answer.
 FOLDED_MIN_HEIGHT = 560
-PLOT_MIN_HEIGHT = 120
+# The picture's floors and ceiling: the spectrum is the tuning aid and the
+# waterfall is what is being watched, so the waterfall takes the height and the
+# spectrum yields first when there is not enough of it -- and it yields in a
+# tall window too, which is what the ceiling is for: past 200 px of tuning aid
+# every further pixel of picture goes to the history.
+SPECTRUM_MIN_H = 80
+SPECTRUM_MAX_H = 200
+WATERFALL_MIN_H = 140
+# What the floor of the window allows the picture.  It is the two plots' own
+# minimums added up rather than a number of its own: the splitter cannot be
+# shorter than what is inside it, and pretending otherwise is how a floor comes
+# to be a window with its rows cut off at the bottom edge.
+PLOT_MIN_HEIGHT = SPECTRUM_MIN_H + WATERFALL_MIN_H
 
 REPAINT_MS = 45
 
@@ -240,6 +276,8 @@ PREFS_SAVE_MS = 1500
 # from the audio the decoder is fed.  Remembered before it is applied, and put
 # back when the mode is left (see _ft8_prepare).
 FT8_SQUELCH_DB = -140.0
+
+
 
 # --- the FT8 strip ------------------------------------------------------
 # The decoder list is a table rather than a text block because every row is
@@ -479,6 +517,109 @@ class FastImage(pg.ImageItem):
         super().paint(p, *args)
 
 
+class BandMarkers(pg.GraphicsObject):
+    """The band plan over a plot: an edge at each band limit, a name at the top.
+
+    The bands are already in the window twice -- as Jump to band, and as the
+    label in the tuning row -- and neither says where the next edge is while
+    the operator is tuning towards it.  Drawing them where the frequency axis
+    is read answers that: a carrier at 7.188 MHz is not just a carrier, it is
+    inside 40 m, and the edge of the band is the dashed rule beside it.
+
+    One item, not a line and a label per band.  It is a direct child of the
+    plot's ViewBox, so it paints in the plot's own pixels rather than in MHz
+    and dB: the names stay upright and the same size at every zoom, and the
+    spectrum's dB axis -- which moves on every frame -- has nothing to
+    invalidate, because the labels hang from the top of the box rather than
+    from a value on the axis.  Only a change of span or a resize repaints it.
+    """
+
+    # Space either side of a name inside its box.
+    LABEL_PAD = 5.0
+
+    def __init__(self, plot: pg.PlotWidget):
+        super().__init__()
+        self._vb = plot.plotItem.vb
+        self._font = mono_font(8)
+        self._edge = QColor("#7f97ab")
+        self._text = QColor("#7f97ab")
+        self._fill = QColor(10, 12, 16, 200)
+        # Over the picture and over the curve.  The tuned-frequency marker is
+        # an InfiniteLine inside the ViewBox's item group, and this layer is a
+        # direct child of the ViewBox rather than a member of that group, so
+        # the marker line is drawn under a band's name where the dial happens
+        # to fall on one.
+        self.setZValue(100)
+        self.setParentItem(self._vb)
+        self._vb.sigXRangeChanged.connect(self._ranges_changed)
+        self._vb.sigResized.connect(self._ranges_changed)
+
+    def boundingRect(self) -> QRectF:
+        return self._vb.rect()
+
+    def _ranges_changed(self, *_):
+        self.update()
+
+    def set_colours(self, edge: str, plot_colour: str) -> None:
+        """Take the scheme's colours: the rules and names, and the wash behind
+        the names that keeps them readable over the waterfall."""
+        self._edge = QColor(edge)
+        self._text = QColor(edge)
+        self._fill = QColor(plot_colour)
+        self._fill.setAlpha(200)
+        self.update()
+
+    def paint(self, p: QPainter, *args) -> None:
+        r = self._vb.rect()
+        (lo_mhz, hi_mhz), _ = self._vb.viewRange()
+        lo, hi = lo_mhz * 1e6, hi_mhz * 1e6
+        if not hi > lo or r.width() < 1.0:
+            return
+        per_hz = r.width() / (hi - lo)
+
+        def x_of(f: float) -> float:
+            return r.left() + (f - lo) * per_hz
+
+        visible = bands.bands_in_view(lo, hi)
+        if not visible:
+            return
+        p.save()
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        pen = QPen(self._edge, 1.0, Qt.PenStyle.DashLine)
+        p.setPen(pen)
+        for b in visible:
+            # Two bands that share an edge (75 m and 80 m both end at 4 MHz)
+            # draw it twice; the same opaque rule twice is the same rule.
+            for edge in (b.low, b.high):
+                x = x_of(edge)
+                if r.left() <= x <= r.right():
+                    p.drawLine(QPointF(x, r.top()), QPointF(x, r.bottom()))
+
+        p.setFont(self._font)
+        fm = QFontMetricsF(self._font)
+        height = fm.height() + 2.0
+        taken: list[tuple[float, float]] = []
+        for b in visible:
+            width = fm.horizontalAdvance(b.name) + 2.0 * self.LABEL_PAD
+            left = x_of(b.low)
+            right = x_of(b.high)
+            shown = min(right, r.right()) - max(left, r.left())
+            if shown < width + 8.0:
+                continue            # too narrow to name without lying
+            x = 0.5 * (max(left, r.left()) + min(right, r.right())) - 0.5 * width
+            x = min(max(x, r.left() + 2.0), r.right() - 2.0 - width)
+            if any(x < t1 and t0 < x + width for t0, t1 in taken):
+                continue            # two bands' names would overlap
+            taken.append((x, x + width))
+            box = QRectF(x, r.top() + 2.0, width, height)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(self._fill))
+            p.drawRoundedRect(box, 2.0, 2.0)
+            p.setPen(self._text)
+            p.drawText(box, Qt.AlignmentFlag.AlignCenter, b.name)
+        p.restore()
+
+
 class SpectrumPlot(pg.PlotWidget):
     """Spectrum with click/drag tuning."""
 
@@ -495,6 +636,11 @@ class SpectrumPlot(pg.PlotWidget):
         self.hideButtons()
         self.showGrid(x=True, y=True, alpha=0.18)
         self.setLabel("left", "dB")
+        # This is the window's frequency scale, and the only one: the waterfall
+        # below used to carry a second copy of it, 42 px of ruler drawn a
+        # couple of hundred pixels under this one, and every one of those
+        # pixels was a line of history the waterfall did not get (see
+        # WaterfallPlot.__init__).
         self.setLabel("bottom", "MHz")
         self.getAxis("left").setWidth(PLOT_AXIS_WIDTH)
         two_tick_levels(self)
@@ -514,6 +660,8 @@ class SpectrumPlot(pg.PlotWidget):
                                       pen=pg.mkPen("#ff5f6d", width=1.6))
         self.marker.setZValue(10)
         self.addItem(self.marker)
+
+        self.band_markers = BandMarkers(self)
 
         self._freqs = None
         self._center = 0.0
@@ -709,7 +857,14 @@ class WaterfallPlot(pg.PlotWidget):
         self.setBackground("#0a0c10")
         self.setMouseEnabled(x=False, y=False)
         self.hideButtons()
-        self.setLabel("bottom", "MHz")
+        # No frequency scale of its own.  The spectrum's is the same scale on
+        # the same span -- both plots are given the same view -- and it is
+        # drawn just above this plot, so a second copy under the picture only
+        # cost the picture: measured at 1280x728, 42 px of ruler was 42 rows of
+        # history that the waterfall never got.  Clicking to tune is unaffected:
+        # the pixel-to-frequency mapping is sampled from the view box (see
+        # _axis_px_map), not from the axis item.
+        self.hideAxis("bottom")
         self.getAxis("left").setStyle(showValues=False)
         # Same width as the spectrum's, not merely hidden values: what matters
         # is that both plot areas start and end at the same x.
@@ -718,6 +873,7 @@ class WaterfallPlot(pg.PlotWidget):
         self.img = FastImage(axisOrder="row-major")
         self.addItem(self.img)
         self.invertY(True)          # newest line at the top
+        self.band_markers = BandMarkers(self)
 
         # Two copies of the same history.  `_wf` is the truth: the dB rows the
         # arithmetic is done on, and what a floor, contrast or colour change is
@@ -1082,46 +1238,56 @@ class Bridge(QObject):
 
 # ---------------------------------------------------------------- the meter
 #
-# Drawing the analogue signal meter.  The scale (IARU S units), the dial's
-# geometry and the needle's ballistics all live in rspsdr/smeter.py; what is
-# here is the picture, and the level it is fed.
+# Drawing the signal meter.  The scale (IARU S units), where a level sits on it
+# and the reading's ballistics all live in rspsdr/smeter.py; what is here is the
+# picture, and the level it is fed.
 
 
-class SMeter(QWidget):
-    """An analogue S-meter: a needle over a printed dial.
+class SignalMeter(QWidget):
+    """The signal meter: a bar across the scale, with its peak marker.
 
-    Fed one sample of the demodulator's passband level at a time, along with
-    how long it has been since the last one, so that the needle's rise and fall
-    are the recommended quasi-peak ones rather than whatever the repaint rate
-    happens to be.
+    Fed one sample of the demodulator's passband level at a time, along with how
+    long it has been since the last one, so that the bar's rise and fall are the
+    recommended quasi-peak ones rather than whatever the repaint rate happens to
+    be.  The scale is printed across it -- the same IARU marks and numbers a
+    face carries -- and it is the only meter in the window: the needle and its
+    arc were removed so that the picture below could have their height.
 
-    Everything it draws is also available as numbers -- :meth:`needle`,
-    :meth:`peak_needle`, :meth:`reading_text` -- because a meter that is only
-    ever checked by looking at it has not been checked.
+    It takes whatever width the row gives it, from :data:`smeter.BAR_MIN_WIDTH`
+    up.  A bar is read by its length, so more width is more meter, and the
+    height it costs is one small strip whether the window is wide or narrow.
+
+    Everything it draws is also available as numbers -- :meth:`tip`,
+    :meth:`peak_tip`, :meth:`reading_text` -- because a meter that is only ever
+    checked by looking at it has not been checked.
     """
 
     def __init__(self, ref_dbfs: float | None = None, face: str = "dark",
                  peak: bool = True, parent: QWidget | None = None):
         super().__init__(parent)
-        self.dial = smeter.Dial()
+        self.bar = smeter.Bar()
         self.ball = smeter.Ballistics()
         self.ref_dbfs = float(smeter.DEFAULT_REF_DBFS if ref_dbfs is None
                               else ref_dbfs)
         self.face = face if face in smeter.FACES else "dark"
         self.peak_on = bool(peak)
         self.level_dbfs = -200.0        # the passband level, as last measured
-        self.dbm = smeter.DIAL_LO_DBM   # what the needle is showing
-        self.peak_dbm = smeter.DIAL_LO_DBM
-        self.setFixedSize(smeter.WIDTH, smeter.HEIGHT)
+        self.dbm = smeter.SCALE_LO_DBM  # what the bar is showing
+        self.peak_dbm = smeter.SCALE_LO_DBM
+        self.setMinimumWidth(smeter.BAR_MIN_WIDTH)
+        self.setFixedHeight(smeter.BAR_HEIGHT)
+        policy = self.sizePolicy()
+        policy.setHorizontalPolicy(QSizePolicy.Policy.Expanding)
+        self.setSizePolicy(policy)
         self.setToolTip(
             "Signal strength on the IARU scale: S9 is -73 dBm (50 uV into "
             "50 ohms), each S unit below it is 6 dB, and above it the steps "
             "are 10 dB.\n"
             "Measured in the passband being listened to, before the audio AGC "
-            "and the volume, so it does not follow the volume control.\n"
-            "The needle rises in ~10 ms and falls with a 500 ms time constant, "
-            "which is the recommended quasi-peak response; the yellow marker "
-            "holds the highest level for half a second.\n"
+            "and the volume, so it does not follow the volume control.  The bar "
+            "rises in ~10 ms and falls with a 500 ms time constant, which is "
+            "the recommended quasi-peak response; the yellow line is the peak "
+            "marker, holding the highest level of the last half second.\n"
             "“S9 at” is the level that reads S9 -- set it so the meter agrees "
             "with a station or signal generator of known strength.")
 
@@ -1139,11 +1305,11 @@ class SMeter(QWidget):
         """Back to rest, as though the radio had only just been switched on."""
         self.ball.reset()
         self.level_dbfs = -200.0
-        self.dbm = self.peak_dbm = smeter.DIAL_LO_DBM
+        self.dbm = self.peak_dbm = smeter.SCALE_LO_DBM
         self.update()
 
     def set_ref(self, ref_dbfs: float) -> None:
-        """Say which level reads S9, and start the needle again from rest."""
+        """Say which level reads S9, and start the bar again from rest."""
         self.ref_dbfs = float(ref_dbfs)
         self.ball.reset()
         self.update()
@@ -1158,31 +1324,34 @@ class SMeter(QWidget):
 
     @staticmethod
     def _clamp(dbm: float) -> float:
-        return max(smeter.DIAL_LO_DBM, min(float(dbm), smeter.DIAL_HI_DBM))
+        return max(smeter.SCALE_LO_DBM, min(float(dbm), smeter.SCALE_HI_DBM))
 
     # -- what is drawn, as numbers ------------------------------------
     @property
     def palette(self) -> dict:
         return smeter.FACES[self.face]
 
-    def needle(self) -> tuple[float, float, float, float]:
-        """The needle as a line in the widget's own coordinates."""
-        return smeter.needle_geometry(self.width(), self.height(),
-                                      self.dial.angle(self.dbm))
+    def tip(self) -> float:
+        """Where the bar's edge is, in the widget's own pixels."""
+        return self._x(self.dbm)
 
-    def peak_needle(self) -> tuple[float, float, float, float] | None:
-        """The peak-hold marker, or None when the peak is switched off."""
+    def peak_tip(self) -> float | None:
+        """The peak marker's pixel, or None when the peak is switched off."""
         if not self.peak_on:
             return None
-        return smeter.needle_geometry(self.width(), self.height(),
-                                      self.dial.angle(self.peak_dbm), 0.94)
+        return self._x(self.peak_dbm)
+
+    def _x(self, dbm: float) -> float:
+        """A level as a pixel across the trough."""
+        return self.bar.x(dbm, smeter.BAR_EDGE,
+                          float(self.width()) - 2.0 * smeter.BAR_EDGE)
 
     def level_dbm(self) -> float:
-        """The measured level in dBm -- the exact figure, not the needle's."""
+        """The measured level in dBm -- the exact figure, not the bar's."""
         return smeter.dbm_for_dbfs(self.level_dbfs, self.ref_dbfs)
 
     def reading_text(self) -> str:
-        """What the face says, which is the level rather than the needle."""
+        """What the meter says, which is the level rather than the bar."""
         if self.level_dbfs <= -190.0:
             return "--"                  # nothing measured: no radio running
         return smeter.reading(self.level_dbm())
@@ -1196,89 +1365,78 @@ class SMeter(QWidget):
             p.end()
 
     def _paint(self, p: QPainter) -> None:
-        # Antialiasing on here, unlike the plots: this is a few hundred pixels
-        # of thin lines on a small widget, where a stair-stepped needle is the
-        # first thing anyone would notice, and the cost is a fraction of a
-        # millisecond.
+        # Antialiasing on here, unlike the plots: this is a strip of thin lines
+        # and small type in a widget a few hundred pixels wide, where the
+        # stair-stepping is the first thing anyone would notice, and the cost is
+        # a fraction of a millisecond.
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         col = self.palette
         w, h = float(self.width()), float(self.height())
         glass = QPainterPath()
-        glass.addRoundedRect(QRectF(1.0, 1.0, w - 2.0, h - 2.0), 6.0, 6.0)
-
+        glass.addRoundedRect(QRectF(1.0, 1.0, w - 2.0, h - 2.0),
+                             smeter.BAR_GLASS_R, smeter.BAR_GLASS_R)
         sheen = QLinearGradient(0.0, 0.0, 0.0, h)
         sheen.setColorAt(0.0, QColor(col["face2"]))
         sheen.setColorAt(0.5, QColor(col["face"]))
         sheen.setColorAt(1.0, QColor(col["face"]))
         p.fillPath(glass, QBrush(sheen))
         bezel = QPen(QColor(col["bezel"]))
-        bezel.setWidthF(1.4)
+        bezel.setWidthF(smeter.BAR_BEZEL_W)
         p.setPen(bezel)
         p.drawPath(glass)
 
+        left = smeter.BAR_EDGE
+        span = w - 2.0 * left
+        top, deep = smeter.BAR_TOP, smeter.BAR_TRACK
+        trough = QPainterPath()
+        trough.addRoundedRect(QRectF(left, top, span, deep),
+                              smeter.BAR_R, smeter.BAR_R)
         p.save()
         p.setClipPath(glass)            # nothing is drawn outside the glass
-        self._paint_dial(p, w, h)
-        peak = self.peak_needle()
+        # The trough is the face's own colour darkened, so that it is an inset on
+        # either face without a third colour in the table.
+        p.fillPath(trough, QBrush(QColor(col["face"]).darker(smeter.BAR_DARKEN)))
+
+        tip = self.tip()
+        if tip > left + 0.5:
+            p.save()
+            p.setClipPath(trough)
+            p.fillRect(QRectF(left, top, tip - left, deep),
+                       QColor(col["bar"]))
+            p.restore()
+
+        # The marks go over the fill, so that they read across it as they do
+        # across an empty trough, and the numbers sit under them: the scale's
+        # own marks, at the scale's own levels.
+        p.setFont(mono_font(smeter.BAR_TYPE_PT))
+        for i, (_dbm, label, major) in enumerate(self.bar.marks):
+            x = left + self.bar.mark_position(i) * span
+            pen = QPen(QColor(col["major"] if major else col["minor"]))
+            pen.setWidthF(smeter.BAR_MARK_W[0] if major else smeter.BAR_MARK_W[1])
+            p.setPen(pen)
+            reach = deep if major else smeter.BAR_SHORT
+            p.drawLine(QPointF(x, top + deep), QPointF(x, top + deep - reach))
+            if label:
+                p.setPen(QPen(QColor(col["number"])))
+                # Centred under its mark, and moved inwards when that would run
+                # off the glass: the marks at either end of the scale are where
+                # the face runs out, and half a number is worse than a number a
+                # few pixels inboard of its own tick.
+                width = float(p.fontMetrics().horizontalAdvance(label))
+                x0 = min(max(x - width / 2.0, 2.0), w - 2.0 - width)
+                p.drawText(QRectF(x0, top + deep + 1.0, width + 1.0,
+                                  h - top - deep - 3.0),
+                           int(Qt.AlignmentFlag.AlignLeft
+                               | Qt.AlignmentFlag.AlignVCenter), label)
+
+        peak = self.peak_tip()
         if peak is not None:
-            self._paint_needle(p, peak, col["peak"], 1.5)
-        self._paint_needle(p, self.needle(), col["needle"], 1.8,
-                           col["needle_edge"])
+            pen = QPen(QColor(col["peak"]))
+            pen.setWidthF(smeter.BAR_PEAK_W)
+            p.setPen(pen)
+            p.drawLine(QPointF(peak, top + 0.5), QPointF(peak, top + deep - 0.5))
         p.restore()
 
-        # The caption and the exact reading, along the foot of the face: the
-        # needle is the instrument, the text is the measurement.
-        p.setFont(mono_font(7))
-        band = QRectF(7.0, h - 15.0, w - 14.0, 11.0)
-        p.setPen(QPen(QColor(col["caption"])))
-        p.drawText(band, int(Qt.AlignmentFlag.AlignLeft
-                            | Qt.AlignmentFlag.AlignVCenter), "S-METER")
-        p.setPen(QPen(QColor(col["number"])))
-        p.drawText(band, int(Qt.AlignmentFlag.AlignRight
-                            | Qt.AlignmentFlag.AlignVCenter),
-                   self.reading_text())
-
-    def _paint_dial(self, p: QPainter, w: float, h: float) -> None:
-        """The arc: its ticks, and the numbers beside the long ones."""
-        col = self.palette
-        p.setFont(mono_font(7))
-        for i, (_dbm, label, major) in enumerate(self.dial.marks):
-            angle = self.dial.mark_angle(i)
-            inner = smeter.needle_geometry(w, h, angle, self._frac(6.0, h))
-            outer = smeter.needle_geometry(w, h, angle, 1.0)
-            pen = QPen(QColor(col["major"] if major else col["minor"]))
-            pen.setWidthF(1.4 if major else 0.8)
-            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            p.setPen(pen)
-            p.drawLine(QPointF(outer[2], outer[3]), QPointF(inner[2], inner[3]))
-            if label:
-                spot = smeter.needle_geometry(w, h, angle, self._frac(18.0, h))
-                p.setPen(QPen(QColor(col["number"])))
-                p.drawText(QRectF(spot[2] - 13.0, spot[3] - 5.0, 26.0, 11.0),
-                           int(Qt.AlignmentFlag.AlignCenter), label)
-
-    @staticmethod
-    def _frac(short_by: float, h: float) -> float:
-        """Radius fraction that sits ``short_by`` pixels inside the arc."""
-        pivot_y = h * (1.0 + smeter.PIVOT_DROP)
-        full = pivot_y - 0.14 * h
-        return max(0.05, (full - short_by) / full)
-
-    @classmethod
-    def _paint_needle(cls, p: QPainter, line, colour: str, width: float,
-                      edge: str | None = None) -> None:
-        x1, y1, x2, y2 = line
-        if edge is not None:
-            outline = QPen(QColor(edge))
-            outline.setWidthF(width + 1.6)
-            outline.setCapStyle(Qt.PenCapStyle.RoundCap)
-            p.setPen(outline)
-            p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
-        pen = QPen(QColor(colour))
-        pen.setWidthF(width)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        p.setPen(pen)
-        p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
 
 
 # Opening the radio, and not giving up when the device is not free yet.
@@ -1398,7 +1556,7 @@ class SettingsPane(QWidget):
         self._rows: list[QWidget] = []
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(4)
+        lay.setSpacing(3)
 
         head = QWidget()
         h = QHBoxLayout(head)
@@ -1420,7 +1578,7 @@ class SettingsPane(QWidget):
         self.body = QWidget()
         self.body_lay = QVBoxLayout(self.body)
         self.body_lay.setContentsMargins(0, 0, 0, 0)
-        self.body_lay.setSpacing(4)
+        self.body_lay.setSpacing(3)
         lay.addWidget(self.body)
         self._sync()
 
@@ -1584,24 +1742,44 @@ class MainWindow(QMainWindow):
     def _build_ui(self):
         central = QWidget()
         root = QVBoxLayout(central)
-        root.setContentsMargins(6, 6, 6, 4)
-        root.setSpacing(5)
+        # The tightest margins and spacing Qt will give: every pixel between
+        # the rows is a pixel the picture does not have, and the rows are
+        # already the shortest they can be at the controls they hold.
+        root.setContentsMargins(3, 3, 3, 2)
+        root.setSpacing(2)
 
         root.addWidget(self._build_header())
         root.addWidget(self._build_tuning_row())
         root.addWidget(self._build_mode_row())
         root.addWidget(self._build_memory_row())
-        # The last row before the picture, and the one nearest it: the signal
-        # meter reads what the picture below it shows, and an operator glancing
-        # at the needle is looking at the top right of the set.
+        # The last row before the picture, and the one nearest it: the meter
+        # shows what the picture below it shows, and the eye that glances at it
+        # is already on the top of the display.
         root.addWidget(self._build_meter_row())
 
         self.spectrum = SpectrumPlot()
         self.waterfall = WaterfallPlot()
+        # The picture's two halves, and the priority between them in one place:
+        # the spectrum is the tuning aid, the waterfall is what is being watched,
+        # so the spectrum has a ceiling -- a quarter of what the two would take
+        # together in a tall window -- and the waterfall has everything else.
+        # Each has a floor as well, and the spectrum's is the smaller, so that a
+        # window too short for both squeezes the tuning aid first and the
+        # history last.  Both plots prefer, by their own size hints, to be the
+        # other way round -- 218 px of spectrum against 58 of waterfall -- which
+        # is why the shares are set here rather than left to the splitter.
+        self.spectrum.setMinimumHeight(SPECTRUM_MIN_H)
+        self.spectrum.setMaximumHeight(SPECTRUM_MAX_H)
+        self.waterfall.setMinimumHeight(WATERFALL_MIN_H)
         self.split = QSplitter(Qt.Orientation.Vertical)
         self.split.addWidget(self.spectrum)
         self.split.addWidget(self.waterfall)
-        self.split.setSizes([300, 340])     # the divider is remembered too
+        # One part tuning aid to four of history to open with: in a short
+        # window the spectrum is at its floor within a pixel or two of this
+        # anyway, and in a tall one it stops at SPECTRUM_MAX_H, so what the
+        # share really decides is how quickly the waterfall takes the rest.
+        # The divider is the user's to drag from there, and is remembered.
+        self.split.setSizes([160, 680])
         root.addWidget(self.split, 1)
 
         # Everything that is set rather than listened to, in one pane that
@@ -1625,9 +1803,20 @@ class MainWindow(QMainWindow):
         root.addWidget(self.ft8_panel)
         self.setCentralWidget(central)
 
+        # The status strip: the cursor readout at the left, then what the
+        # program is doing.  The receiver in use is here rather than in the
+        # tuning row, where its label -- "SDRplay Dev0 RSP1 0000000001" is 211
+        # px of it -- was the item that pushed that row onto a second line: 42
+        # px of picture spent on a string that never changes.  The status bar
+        # is always on screen, folding the settings away does not lose it, and
+        # "no SDR found" is more use down here than among the controls.
         self.status = self.statusBar()
         self.lbl_status = QLabel("")
         self.status.addPermanentWidget(self.lbl_status)
+        self.lbl_device = QLabel("no device")
+        self.lbl_device.setToolTip("The receiver this window will open")
+        self._tint(self.lbl_device, "muted")
+        self.status.addPermanentWidget(self.lbl_device)
         self.lbl_cursor = QLabel("")
         self.status.addWidget(self.lbl_cursor, 1)
 
@@ -1738,36 +1927,56 @@ class MainWindow(QMainWindow):
         return box
 
     def _build_meter_row(self) -> QWidget:
-        """The signal meter, upper right, in the row above the picture.
+        """The signal meter, across the row above the picture.
 
-        It used to sit inside the gain row, among a dozen boxes, where the one
-        instrument in the window that is meant to be read at a glance was the
-        hardest thing to find.  Here it is the top right corner of the display
-        area, which is where a transceiver puts it, with the same reading in
-        figures beside it for the times the needle is between two marks.  Its
-        setup -- the calibration, the peak marker and the face -- is with the
-        rest of the settings below the picture.
+        It used to sit in the top right corner, with an analogue dial above it:
+        a needle, an arc, 222 px of instrument.  The needle is gone and the bar
+        is the meter -- the same reading and the same scale, in the form that
+        costs one 38 px strip -- and the strip is given the whole width of the
+        row rather than the width the dial happened to be.  A bar is read by its
+        length, so the width the dial's corner took is now the meter's, and the
+        height the dial took is the picture's.
+
+        The exact figure is printed beside it, at the right-hand end, for the
+        moments when the mark a level sits between is the only thing the strip
+        can say.  Its setup -- the calibration, the peak marker and the face --
+        is with the rest of the settings below the picture.
         """
         w = QWidget()
         h = QHBoxLayout(w)
         h.setContentsMargins(4, 0, 4, 0)
         h.setSpacing(8)
-        h.addStretch(1)                 # the pair sits against the right edge
+
+        self.meter = SignalMeter()
+        h.addWidget(self.meter, 1)      # the bar takes the width it can get
 
         self.lbl_smeter = QLabel("")            # the same reading as text
-        self.lbl_smeter.setFont(mono_font(9))
+        self.lbl_smeter.setFont(mono_font(12))
         self._tint(self.lbl_smeter, "text")
-        self.lbl_smeter.setMinimumWidth(132)
+        self.lbl_smeter.setMinimumWidth(210)
         self.lbl_smeter.setAlignment(Qt.AlignmentFlag.AlignRight
                                      | Qt.AlignmentFlag.AlignVCenter)
         h.addWidget(self.lbl_smeter)
 
-        self.smeter = SMeter()
-        h.addWidget(self.smeter)
+        # The strip is a fixed height and takes no shrinking: with a preferred
+        # height Qt will shave 38 px off this row at the window's floor -- there
+        # is no room to take it from the picture, which is at its own minimum --
+        # and lay the scale's numbers over the row below.  Fixed, the squeeze
+        # lands where it belongs: on the picture, which is the one thing here
+        # that still looks like itself when it is short.
+        w.setFixedHeight(smeter.BAR_HEIGHT)
         return w
 
     def _build_look_row(self) -> QWidget:
-        """How the window looks, and what the meter is set to read."""
+        """How the window looks, how the audio is set, what the meter reads.
+
+        This is the pane's first row and the one with room, so the settings
+        that are set once and then left alone live here: the colour scheme, the
+        CW pitch, whether the audio is levelled, and the meter's own display.
+        They were in the rows above the picture, where a 40 px control costs a
+        40 px line of the waterfall; here they cost nothing while the pane is
+        folded away.
+        """
         w, lay = self._row()
 
         self.cmb_theme = QComboBox()
@@ -1787,10 +1996,9 @@ class MainWindow(QMainWindow):
         sep.setFrameShape(QFrame.Shape.VLine)
         lay.addWidget(sep)
 
-        # The meter's own settings, here rather than beside the needle: the
-        # needle is up above the picture now, and a control that changes a
-        # setting belongs with the other settings, not in the corner of the
-        # display.
+        # The meter's own settings, here rather than beside the strip: the strip
+        # is up above the picture, and a control that changes a setting belongs
+        # with the other settings, not in the row the picture is joined to.
         self.spn_sref = QDoubleSpinBox()
         self.spn_sref.setDecimals(1)
         self.spn_sref.setRange(-140.0, 0.0)
@@ -1809,23 +2017,76 @@ class MainWindow(QMainWindow):
         self.chk_speak = QCheckBox("Peak")
         self.chk_speak.setChecked(True)
         self.chk_speak.setToolTip(
-            "A second needle that holds the highest level of the last half "
-            "second, so a brief signal is not missed between repaints")
+            "A marker that holds the highest level of the last half second, so "
+            "a brief signal is not missed between repaints")
         lay.addWidget(self.chk_speak)
 
         self.cmb_sface = QComboBox()
         for name in smeter.FACE_NAMES:
             self.cmb_sface.addItem(name.capitalize(), name)
         self.cmb_sface.setToolTip(
-            "Meter scale colouring: the dark face of the later radios, or the "
-            "cream dial of the older analogue ones.  The face is the meter's "
-            "own -- a scheme does not change it -- and the cream one is the "
-            "one that sits well on the Daylight scheme.")
+            "Meter colouring: the dark face of the later radios, or the cream "
+            "one of the older analogue sets.  The face is the meter's own -- a "
+            "scheme does not change it -- and the cream one is the one that "
+            "sits well on the Daylight scheme.")
         lay.addWidget(self._pair("Face", self.cmb_sface))
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.VLine)
+        lay.addWidget(sep)
+
+        # The two audio preferences.  Neither is a control the hand goes to
+        # while listening -- the CW note and whether the audio is levelled are
+        # set once by the operator who cares about them -- so they are here
+        # rather than in the mode row, which they were pushing onto a second
+        # line (31 px of picture for two controls that are touched once).
+        self.spn_pitch = QDoubleSpinBox()
+        self.spn_pitch.setRange(200.0, 1500.0)
+        self.spn_pitch.setSingleStep(10.0)
+        self.spn_pitch.setValue(self.settings.cw_pitch)
+        self.spn_pitch.setSuffix(" Hz")
+        self.spn_pitch.setToolTip(
+            "The note CW is received and sent on.  The filter is centred here, "
+            "not on the dial, so this is the pitch the signal is heard at")
+        lay.addWidget(self._pair("CW pitch", self.spn_pitch))
+
+        self.chk_aagc = QCheckBox("Audio AGC")
+        self.chk_aagc.setChecked(self.settings.audio_agc)
+        self.chk_aagc.setToolTip(
+            "Level the demodulated audio so that fading signals stay audible")
+        lay.addWidget(self.chk_aagc)
+
+        # The spectrum's peak-hold trace is the one thing in this window that
+        # is a picture rather than a reading, and forgetting it is a click:
+        # "Clear peak" was the item that would not fit the waterfall row under
+        # the Detail and Zoom controls, and it reads as a preference besides.
+        self.btn_clear = QPushButton("Clear peak")
+        self.btn_clear.setToolTip("Forget the spectrum's peak-hold trace")
+        lay.addWidget(self.btn_clear)
+
+        # The band plan over the picture, on by default: where the bands are
+        # is the first thing a listener looking for signals wants to know.
+        self.chk_bands = QCheckBox("Band markers")
+        self.chk_bands.setChecked(True)
+        self.chk_bands.setToolTip(
+            "Mark the amateur and shortwave band edges on both the spectrum "
+            "and the waterfall, and name each band along the top")
+        lay.addWidget(self.chk_bands)
 
         return w
 
     def _build_tuning_row(self) -> QWidget:
+        """What the operator tunes *with*, and nothing else.
+
+        The row wraps, and a wrapped row is two lines tall -- 43 px of picture
+        at 1280 px wide -- so what is on it decides how big the waterfall is.
+        The receiver's own settings (the sample rate, the hardware centre, the
+        gains, the FFT) are not here: they are in the pane below the picture,
+        with the receiver's other settings, where they cost the picture nothing
+        while the pane is folded.  What is left is the dial, the band, the step
+        and the two shortcuts to a band or a preset -- read or used every
+        session, and worth the pixels.
+        """
         w, lay = self._row()
 
         self.btn_start = QPushButton("▶  Start")
@@ -1833,35 +2094,17 @@ class MainWindow(QMainWindow):
         self.btn_start.setStyleSheet(self._start_button_style(False))
         lay.addWidget(self.btn_start)
 
-        self.lbl_device = QLabel("no device")
-        self._tint(self.lbl_device, "muted")
-        lay.addWidget(self.lbl_device)
-
-        self.cmb_rate = QComboBox()
-        for name, val in RATES:
-            self.cmb_rate.addItem(name, val)
-        # A rate outside the list -- "--rate 7000000" on the command line, or
-        # any rate the hardware accepts that the list does not name -- used to
-        # raise ValueError here and take the whole window down with it.  Add it
-        # to the list instead, so what the window shows is what is running.
-        idx = self.cmb_rate.findData(int(self.settings.sample_rate))
-        if idx < 0:
-            self.cmb_rate.addItem(f"{self.settings.sample_rate/1e6:g} MSps",
-                                  int(self.settings.sample_rate))
-            idx = self.cmb_rate.count() - 1
-        self.cmb_rate.setCurrentIndex(idx)
-        lay.addWidget(self._pair("Rate", self.cmb_rate))
-
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.VLine)
-        lay.addWidget(sep)
-
         self.spn_freq = QDoubleSpinBox()
         self.spn_freq.setDecimals(6)
         self.spn_freq.setRange(0.01, 2000.0)
         self.spn_freq.setSuffix(" MHz")
-        self.spn_freq.setFont(mono_font(20, True))
-        self.spn_freq.setMinimumWidth(280)
+        # The tuned frequency is the one number in this window that is read from
+        # across the room, so it is set in the largest type here: 28 pt, on a
+        # box wide enough for the longest reading it can hold ("0000.000 MHz"
+        # at a narrow width, or a 9-digit frequency) without the last digit
+        # being clipped off.
+        self.spn_freq.setFont(mono_font(28, True))
+        self.spn_freq.setMinimumWidth(350)
         self.spn_freq.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.NoButtons)
         self.spn_freq.setValue(self.settings.tuned_freq / 1e6)
         lay.addWidget(self.spn_freq)
@@ -1889,18 +2132,6 @@ class MainWindow(QMainWindow):
         self.cmb_step.setCurrentIndex(3)
         lay.addWidget(self.cmb_step)
 
-        self.spn_center = QDoubleSpinBox()
-        self.spn_center.setDecimals(6)
-        self.spn_center.setRange(0.01, 2000.0)
-        self.spn_center.setSuffix(" MHz")
-        self.spn_center.setSingleStep(0.1)
-        self.spn_center.setValue(self.settings.center_freq / 1e6)
-        self.spn_center.setMinimumWidth(150)
-        self.btn_recentre = QPushButton("⌖")
-        self.btn_recentre.setToolTip("Recentre the spectrum on the tuned frequency")
-        self.btn_recentre.setFixedWidth(30)
-        lay.addWidget(self._pair("Centre", self.spn_center, self.btn_recentre))
-
         self.cmb_band = QComboBox()
         self.cmb_band.addItem("Jump to band…", None)
         self.cmb_band.insertSeparator(1)
@@ -1926,7 +2157,7 @@ class MainWindow(QMainWindow):
         for label, key, _ in MODES:
             b = QPushButton(label)
             b.setCheckable(True)
-            b.setFixedWidth(52)
+            b.setFixedWidth(46)
             self.mode_buttons[key] = b
         lay.addWidget(self._pair("Mode", *self.mode_buttons.values()))
         # Tick the mode the window was started in.  Not _select_mode: the
@@ -1946,28 +2177,14 @@ class MainWindow(QMainWindow):
         self._select_bw(self.settings.filter_bw)
         lay.addWidget(self._pair("Filter", self.cmb_bw))
 
-        self.spn_pitch = QDoubleSpinBox()
-        self.spn_pitch.setRange(200.0, 1500.0)
-        self.spn_pitch.setSingleStep(10.0)
-        self.spn_pitch.setValue(self.settings.cw_pitch)
-        self.spn_pitch.setSuffix(" Hz")
-        lay.addWidget(self._pair("CW pitch", self.spn_pitch))
-
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.VLine)
-        lay.addWidget(sep)
-
         self.sld_vol = QSlider(Qt.Orientation.Horizontal)
         self.sld_vol.setRange(0, 150)
         self.sld_vol.setValue(int(self.settings.volume * 100))
-        self.sld_vol.setFixedWidth(110)
+        self.sld_vol.setFixedWidth(96)
         lay.addWidget(self._pair("Vol", self.sld_vol))
 
         self.chk_mute = QCheckBox("Mute")
         lay.addWidget(self.chk_mute)
-        self.chk_aagc = QCheckBox("Audio AGC")
-        self.chk_aagc.setChecked(self.settings.audio_agc)
-        lay.addWidget(self.chk_aagc)
 
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.VLine)
@@ -1982,7 +2199,7 @@ class MainWindow(QMainWindow):
         self.sld_nr = QSlider(Qt.Orientation.Horizontal)
         self.sld_nr.setRange(0, 100)
         self.sld_nr.setValue(int(self.settings.nr_level))
-        self.sld_nr.setFixedWidth(90)
+        self.sld_nr.setFixedWidth(80)
         self.sld_nr.setEnabled(self.settings.nr)
         self.sld_nr.setToolTip("How hard the noise reduction works")
         lay.addWidget(self.sld_nr)
@@ -2030,7 +2247,53 @@ class MainWindow(QMainWindow):
         return w
 
     def _build_rf_row(self) -> QWidget:
+        """The receiver itself: where it is tuned, and how hard it listens.
+
+        The sample rate and the hardware centre are here rather than in the
+        tuning row, because they are what the *receiver* is doing rather than
+        what the dial is set to -- the dial is the operator's, the centre is
+        the hardware's, and the window recentres on its own as the dial is
+        turned (see _maybe_recentre).  Set once and left alone, so they belong
+        with the receiver's other settings, which fold away with the picture's
+        height.
+        """
         w, lay = self._row()
+
+        self.cmb_rate = QComboBox()
+        for name, val in RATES:
+            self.cmb_rate.addItem(name, val)
+        # A rate outside the list -- "--rate 7000000" on the command line, or
+        # any rate the hardware accepts that the list does not name -- used to
+        # raise ValueError while the window was being built and take the whole
+        # window down with it.  Add it to the list instead, so what the window
+        # shows is what is running.
+        idx = self.cmb_rate.findData(int(self.settings.sample_rate))
+        if idx < 0:
+            self.cmb_rate.addItem(f"{self.settings.sample_rate/1e6:g} MSps",
+                                  int(self.settings.sample_rate))
+            idx = self.cmb_rate.count() - 1
+        self.cmb_rate.setCurrentIndex(idx)
+        self.cmb_rate.setToolTip(
+            "How much spectrum the RSP1 hands over at once.  It fixes the "
+            "span of the picture and costs roughly twice the CPU for twice "
+            "the rate")
+        lay.addWidget(self._pair("Rate", self.cmb_rate))
+
+        self.spn_center = QDoubleSpinBox()
+        self.spn_center.setDecimals(6)
+        self.spn_center.setRange(0.01, 2000.0)
+        self.spn_center.setSuffix(" MHz")
+        self.spn_center.setSingleStep(0.1)
+        self.spn_center.setValue(self.settings.center_freq / 1e6)
+        self.spn_center.setMinimumWidth(150)
+        self.btn_recentre = QPushButton("⌖")
+        self.btn_recentre.setToolTip("Recentre the spectrum on the tuned frequency")
+        self.btn_recentre.setFixedWidth(30)
+        lay.addWidget(self._pair("Centre", self.spn_center, self.btn_recentre))
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.VLine)
+        lay.addWidget(sep)
 
         self.chk_agc = QCheckBox("RF AGC")
         self.chk_agc.setChecked(self.settings.rf_agc)
@@ -2199,10 +2462,6 @@ class MainWindow(QMainWindow):
                                  self.lbl_zoom))
         self._update_zoom_readout()
 
-        self.btn_clear = QPushButton("Clear peak")
-        self.btn_clear.setToolTip("Forget the spectrum's peak-hold trace")
-        lay.addWidget(self.btn_clear)
-
         return w
 
     def _build_ft8_panel(self) -> QWidget:
@@ -2287,6 +2546,7 @@ class MainWindow(QMainWindow):
         self.cmb_step.currentIndexChanged.connect(self._step_changed)
         self.btn_recentre.clicked.connect(self._recentre)
         self.cmb_band.currentIndexChanged.connect(self._band_selected)
+        self.chk_bands.toggled.connect(self._band_markers)
         self.cmb_preset.currentIndexChanged.connect(self._preset_selected)
 
         for key, btn in self.mode_buttons.items():
@@ -2431,6 +2691,7 @@ class MainWindow(QMainWindow):
                 axis = plot.getAxis(side)
                 axis.setPen(pg.mkPen(p["grid"], width=1.0))
                 axis.setTextPen(pg.mkPen(p["muted"]))
+            plot.band_markers.set_colours(p["muted"], p["plot"])
         # The grid's colour follows the axis pen; this is only how strongly it
         # is drawn, and a light scheme needs more of it to be seen at all.
         self.spectrum.showGrid(x=True, y=True, alpha=float(p["grid_alpha"]))
@@ -2479,24 +2740,28 @@ class MainWindow(QMainWindow):
         """
         if not hasattr(self, "settings_pane"):
             return
-        if self.settings_pane.is_folded():
-            floor = FOLDED_MIN_HEIGHT
-        else:
-            lay = self.centralWidget().layout()
-            margins = lay.contentsMargins()
-            floor = (margins.top() + margins.bottom()
-                     + lay.spacing() * max(0, lay.count() - 1))
-            width = max(self.width(), MIN_WIDTH)
-            for i in range(lay.count()):
-                wdg = lay.itemAt(i).widget()
-                if wdg is None or wdg.isHidden():
-                    continue            # a hidden FT8 strip takes no height
-                if wdg is self.split:
-                    floor += PLOT_MIN_HEIGHT
-                elif wdg.hasHeightForWidth():
-                    floor += wdg.heightForWidth(width)
-                else:
-                    floor += wdg.sizeHint().height()
+        # Folded or not, the answer is the same sum over the rows that are
+        # actually on show, the settings pane being hidden rather than special:
+        # it is their height plus the picture's own minimum.  The fold used to
+        # be answered with the constant alone, which was true while the rows it
+        # left behind were short enough to fit inside it -- they are not any
+        # more, and a floor below what the rows need is a window that lays one
+        # row over another at the bottom edge.
+        lay = self.centralWidget().layout()
+        margins = lay.contentsMargins()
+        floor = (margins.top() + margins.bottom()
+                 + lay.spacing() * max(0, lay.count() - 1))
+        width = max(self.width(), MIN_WIDTH)
+        for i in range(lay.count()):
+            wdg = lay.itemAt(i).widget()
+            if wdg is None or wdg.isHidden():
+                continue            # a hidden FT8 strip takes no height
+            if wdg is self.split:
+                floor += PLOT_MIN_HEIGHT
+            elif wdg.hasHeightForWidth():
+                floor += wdg.heightForWidth(width)
+            else:
+                floor += wdg.sizeHint().height()
         floor = max(FOLDED_MIN_HEIGHT, int(floor))
         if floor != self.minimumHeight() or self.minimumWidth() != MIN_WIDTH:
             self.setMinimumSize(MIN_WIDTH, floor)
@@ -2560,6 +2825,7 @@ class MainWindow(QMainWindow):
         self.spn_sref.setValue(p.value("ui", "s_meter_ref", "number",
                                        (-140.0, 0.0), smeter.DEFAULT_REF_DBFS))
         self.chk_speak.setChecked(p.value("ui", "s_meter_peak", "flag", (), True))
+        self.chk_bands.setChecked(p.value("ui", "band_markers", "flag", (), True))
         self._select_data(self.cmb_sface,
                           p.value("ui", "s_meter_face", "choice",
                                   smeter.FACE_NAMES, None))
@@ -2665,6 +2931,7 @@ class MainWindow(QMainWindow):
         p.put("ui", "ft8_band", str(self.cmb_ft8band.currentData() or ""))
         p.put("ui", "s_meter_ref", float(self.spn_sref.value()))
         p.put("ui", "s_meter_peak", bool(self.chk_speak.isChecked()))
+        p.put("ui", "band_markers", bool(self.chk_bands.isChecked()))
         p.put("ui", "s_meter_face", str(self.cmb_sface.currentData()))
         p.put("ui", "theme", str(self.theme_name))
         p.put("ui", "settings_folded", bool(self.settings_pane.is_folded()))
@@ -2921,6 +3188,12 @@ class MainWindow(QMainWindow):
         self._select_mode(bd.mode)
         self.cmb_band.setCurrentIndex(0)
 
+    def _band_markers(self, on: bool):
+        """Show or hide the band plan on both halves of the picture."""
+        self.spectrum.band_markers.setVisible(on)
+        self.waterfall.band_markers.setVisible(on)
+        self._remember_soon()
+
     def _preset_selected(self, idx: int):
         p = self.cmb_preset.itemData(idx)
         if p is None:
@@ -2978,44 +3251,44 @@ class MainWindow(QMainWindow):
         """Give the meter the level the receiver is measuring.
 
         Read straight from the demodulator rather than from the status signal: a
-        needle needs about twenty samples a second, and the status bar's own
+        meter needs about twenty samples a second, and the status bar's own
         readout is published every 0.4 s.  The value is one float written by
         the DSP thread once per hop and simply read here, which needs no lock --
-        and the passband level, not the audio, so the needle does not follow the
+        and the passband level, not the audio, so the meter does not follow the
         volume control and does not need the sound card to be working.
         """
         demod = getattr(self.radio, "demod", None)
         now = time.perf_counter()
         dt = 0.0 if self._meter_t is None else min(now - self._meter_t, 0.5)
         self._meter_t = now
-        # A stopped receiver feeds the needle *nothing* rather than the last
+        # A stopped receiver feeds the meter *nothing* rather than the last
         # level it measured.  The demodulator survives being closed, so its
         # passband level stands at whatever was being heard when the stream
-        # stopped -- and a needle frozen at the last signal is worse than no
+        # stopped -- and a bar frozen at the last signal is worse than no
         # reading at all: it looks like the receiver is still listening.  Fed
-        # silence instead, the needle falls away and settles at its rest, which
-        # is what the meter of a set that has been switched off does.
+        # silence instead, the bar empties and settles at its rest, which is
+        # what the meter of a set that has been switched off does.
         dbfs = (demod.passband_db
                 if demod is not None and self.radio.opened else -200.0)
-        self.smeter.feed(dbfs, dt)
-        reading = self.smeter.reading_text()
+        self.meter.feed(dbfs, dt)
+        reading = self.meter.reading_text()
         if reading != self._meter_text:
             self._meter_text = reading
-            level = self.smeter.level_dbm()
+            level = self.meter.level_dbm()
             self.lbl_smeter.setText(
-                f"{reading}   {level:.0f} dBm\n{self.smeter.level_dbfs:.1f} dBFS"
+                f"{reading}   {level:.0f} dBm\n{self.meter.level_dbfs:.1f} dBFS"
                 if reading != "--" else "--   no signal reading\n(radio stopped)")
 
     def _smeter_ref_changed(self, v: float):
-        self.smeter.set_ref(float(v))
+        self.meter.set_ref(float(v))
         self._remember_soon()
 
     def _smeter_peak_changed(self, on: bool):
-        self.smeter.set_peak(bool(on))
+        self.meter.set_peak(bool(on))
         self._remember_soon()
 
     def _smeter_face_changed(self, *_):
-        self.smeter.set_face(str(self.cmb_sface.currentData()))
+        self.meter.set_face(str(self.cmb_sface.currentData()))
         self._remember_soon()
 
     def _wf_settings_changed(self, *_):
@@ -3447,7 +3720,7 @@ class MainWindow(QMainWindow):
     def _render(self):
         # Before the spectrum check: the meter is fed from the DSP rather than
         # from the display, and a frame the window has nothing new to draw is no
-        # reason for the needle to stop moving.
+        # reason for the meter to stop moving.
         self._update_meter()
         if self._latest is None:
             return

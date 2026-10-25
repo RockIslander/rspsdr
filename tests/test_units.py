@@ -579,9 +579,9 @@ check("the readings are the ones an operator would say",
 check("a level between two marks reads between them",
       smeter.reading(-76.0) == "S8.5" and smeter.reading(-100.0) == "S4.5",
       f"{smeter.reading(-76.0)}, {smeter.reading(-100.0)}")
-check("below the first mark the needle is off the scale, and says so",
+check("below the first mark the bar is off the scale, and says so",
       smeter.reading(-140.0) == "S<1" and smeter.reading(-121.0) == "S1.0")
-check("the dial starts below S1 and ends at S9+60",
+check("the scale starts below S1 and ends at S9+60",
       smeter.MARKS[0][0] == -127.0 and smeter.MARKS[-1][0] == -13.0,
       f"{smeter.MARKS[0][0]:g} .. {smeter.MARKS[-1][0]:g} dBm")
 check("every mark is a half unit below S9 or a 10 dB step above it",
@@ -602,64 +602,71 @@ check("raising the reference by 6 dB lowers every reading by one unit",
       abs((smeter.s_for_dbm(smeter.dbm_for_dbfs(-30.0, -51.0))
            - smeter.s_for_dbm(smeter.dbm_for_dbfs(-30.0, -45.0))) - 1.0) < 1e-9)
 
-print("\n== signal meter dial ==")
-dial = smeter.Dial()
-check("the marks are evenly spaced around the arc",
-      all(abs((dial.mark_angle(i + 1) - dial.mark_angle(i))
-              - (smeter.SPAN_DEG / (len(smeter.MARKS) - 1))) < 1e-9
-          for i in range(len(smeter.MARKS) - 1)))
-check("the ends of the dial are the ends of the sweep",
-      dial.mark_angle(0) == smeter.START_DEG
-      and abs(dial.mark_angle(len(smeter.MARKS) - 1)
-              - (smeter.START_DEG + smeter.SPAN_DEG)) < 1e-9,
-      f"{dial.mark_angle(0):g} .. {dial.mark_angle(len(smeter.MARKS) - 1):g}")
-check("every mark points where it is drawn",
-      all(abs(dial.angle(dbm) - dial.mark_angle(i)) < 1e-9
-          for i, (dbm, _l, _m) in enumerate(smeter.MARKS)))
-# The needle is the instrument, so what matters is what a level reads back as:
-# the angle for a level must round-trip to within half the spacing of the marks
-# it falls between, which is the finest a needle can be read to.
+print("\n== the signal meter bar ==")
+# The bar *is* the meter: it replaced the analogue dial, which spent 222 px of
+# the window's height saying what 38 px says.  What is asked here is the same
+# question an operator asks of a bar -- where does the light end, and is that
+# where the scale puts the level -- which is arithmetic, and answerable without
+# a display.  The scale is the printed-dial convention: the marks are evenly
+# spaced *by mark*, and a level between two of them is interpolated linearly in
+# dB, so the mapping is exact at every mark, monotonic and continuous.
+bar = smeter.Bar()
 lo, hi = int(smeter.MARKS[0][0]), int(smeter.MARKS[-1][0])
-round_trip = []
-for dbm in range(lo, hi + 1):
-    got = dial.dbm_at_angle(dial.angle(float(dbm)))
-    round_trip.append(abs(got - dbm) - dial.resolution_db(float(dbm)) / 2.0)
-check("every level on the dial round-trips through the needle to within half a mark",
-      max(round_trip) <= 0.0, f"worst {max(round_trip):+.2f} dB of a tolerance")
-check("the dial is monotonic across its whole range",
-      all(dial.angle(lo + i) < dial.angle(lo + i + 1) for i in range(hi - lo)))
-check("the dial resolves 3 dB in the S region and 5 dB above S9",
-      dial.resolution_db(-100.0) == 3.0 and dial.resolution_db(-60.0) == 5.0,
-      f"{dial.resolution_db(-100.0):g} dB, {dial.resolution_db(-60.0):g} dB")
-check("a needle below the dial and one above it both stop at the ends",
-      dial.angle(-200.0) == dial.mark_angle(0)
-      and dial.angle(0.0) == dial.mark_angle(len(smeter.MARKS) - 1))
-
-# The arc the needle sweeps: a distant pivot below the window, so the scale is a
-# shallow bow across the face rather than a dial, and the tip stays inside it.
-w, h = float(smeter.WIDTH), float(smeter.HEIGHT)
-tips = [smeter.needle_geometry(w, h, dial.mark_angle(i)) for i in range(len(smeter.MARKS))]
-radii = [((x - w / 2) ** 2 + (y - tips[0][1]) ** 2) ** 0.5 for _px, _py, x, y in tips]
-check("every mark sits on one circle about the pivot",
-      max(radii) - min(radii) < 1e-9, f"radius {min(radii):.1f} .. {max(radii):.1f}")
-check("the tip stays inside the face at every mark",
-      all(2.0 <= x <= w - 2.0 and 2.0 <= y <= h - 2.0 for _x, _y, x, y in tips),
-      f"x {min(t[2] for t in tips):.1f}..{max(t[2] for t in tips):.1f}, "
-      f"y {min(t[3] for t in tips):.1f}..{max(t[3] for t in tips):.1f}")
-check("the pivot is out of sight below the window",
-      tips[0][1] > h and abs(tips[0][0] - w / 2) < 1e-9,
-      f"pivot y {tips[0][1]:.1f} of {h:.0f}")
-check("the scale bows upwards away from the centre",
-      tips[0][3] > tips[len(tips) // 2][3] and tips[-1][3] > tips[len(tips) // 2][3],
-      f"ends {tips[0][3]:.1f}, middle {tips[len(tips) // 2][3]:.1f}")
-check("the needle is left of centre at rest and right of it at full scale",
-      tips[0][2] < w / 2 < tips[-1][2],
-      f"left {tips[0][2]:.1f}, right {tips[-1][2]:.1f}, centre {w/2:.1f}")
-short = smeter.needle_geometry(w, h, 0.0, 0.94)
-check("the peak marker is a shorter needle, pointing the same way",
-      abs(short[2] - smeter.needle_geometry(w, h, 0.0)[2]) < 1e-9
-      and short[3] > smeter.needle_geometry(w, h, 0.0)[3],
-      f"peak tip {short[3]:.1f} vs needle {smeter.needle_geometry(w, h, 0.0)[3]:.1f}")
+check("the bar is the scale itself, mark for mark, in the scale's own order",
+      bar.marks == smeter.MARKS, f"{len(bar.marks)} marks")
+check("the ends of the scale are the ends of the bar",
+      bar.position(smeter.MARKS[0][0]) == 0.0
+      and abs(bar.position(smeter.MARKS[-1][0]) - 1.0) < 1e-9,
+      f"{bar.position(smeter.MARKS[0][0]):g} .. "
+      f"{bar.position(smeter.MARKS[-1][0]):g}")
+check("the marks are laid out evenly along the strip, as a printed dial is",
+      all(abs((bar.mark_position(i + 1) - bar.mark_position(i))
+              - 1.0 / (len(smeter.MARKS) - 1)) < 1e-9
+          for i in range(len(smeter.MARKS) - 1)))
+check("every mark fills to exactly where it is drawn",
+      all(abs(bar.position(dbm) - bar.mark_position(i)) < 1e-9
+          for i, (dbm, _l, _m) in enumerate(smeter.MARKS)))
+levels = [lo + i * 0.5 for i in range(int((hi - lo) * 2) + 1)]
+check("it fills left to right as the signal rises, and stops at either end",
+      all(bar.position(v) < bar.position(v + 0.5) for v in levels[:-1])
+      and bar.position(-200.0) == 0.0 and bar.position(0.0) == 1.0)
+# Halfway between two marks is halfway along the gap between them: nothing is
+# rounded to a mark, which is what makes the bar's reading the scale's own.
+mid = (smeter.MARKS[3][0] + smeter.MARKS[4][0]) / 2.0
+check("a level between two marks fills between them, not to one of them",
+      abs(bar.position(mid)
+          - (bar.mark_position(3) + bar.mark_position(4)) / 2.0) < 1e-12
+      and bar.mark_position(3) < bar.position(mid) < bar.mark_position(4),
+      f"{mid:g} dBm fills {bar.position(mid):.4f}, between "
+      f"{bar.mark_position(3):.4f} and {bar.mark_position(4):.4f}")
+check("the bar resolves 3 dB in the S region and 5 dB above S9",
+      bar.resolution_db(-100.0) == 3.0 and bar.resolution_db(-60.0) == 5.0,
+      f"{bar.resolution_db(-100.0):g} dB, {bar.resolution_db(-60.0):g} dB")
+check("a level under the scale and one over it both stop at the ends",
+      bar.position(-200.0) == 0.0 and bar.position(0.0) == 1.0)
+check("a level is a pixel between the two ends of the trough it is given",
+      bar.x(smeter.MARKS[0][0], 8.0, 456.0) == 8.0
+      and abs(bar.x(smeter.MARKS[-1][0], 8.0, 456.0) - 464.0) < 1e-9
+      and abs(bar.x(smeter.dbm_for_s(5), 8.0, 456.0)
+              - (8.0 + 456.0 * bar.position(smeter.dbm_for_s(5)))) < 1e-9,
+      f"S5 fills to {bar.position(smeter.dbm_for_s(5)):.3f} of the bar")
+# The strip's own numbers, and they all have to fit inside the height the row
+# gives the meter: the trough, the numbers under it, and the glass around it.
+check("the trough and the numbers fit inside the strip's own height",
+      0 < smeter.BAR_TOP
+      and smeter.BAR_TOP + smeter.BAR_TRACK < smeter.BAR_HEIGHT
+      and smeter.BAR_SHORT < smeter.BAR_TRACK
+      and smeter.BAR_HEIGHT - (smeter.BAR_TOP + smeter.BAR_TRACK) >= 16.0,
+      f"{smeter.BAR_HEIGHT} px: glass {smeter.BAR_TOP:g}, trough "
+      f"{smeter.BAR_TRACK:g}, numbers under it, {smeter.BAR_TYPE_PT} pt")
+check("it is a strip, not a face: the meter is now the height of one row",
+      smeter.BAR_HEIGHT < 48 and smeter.BAR_GLASS_R * 2 < smeter.BAR_HEIGHT,
+      f"{smeter.BAR_HEIGHT} px tall, glass radius {smeter.BAR_GLASS_R:g}")
+check("and it takes the width the row gives it, from its own minimum up",
+      smeter.BAR_EDGE * 2 < smeter.BAR_MIN_WIDTH
+      and smeter.BAR_MIN_WIDTH < 780.0,
+      f"{smeter.BAR_MIN_WIDTH} px minimum, {smeter.BAR_EDGE:g} px of glass "
+      "either end, inside the narrowest window (780 px)")
 
 print("\n== signal meter ballistics ==")
 ball = smeter.Ballistics()
@@ -667,7 +674,7 @@ ball.update(-100.0, 0.05)
 check("the first sample is taken as it comes, not risen to",
       ball.value == -100.0, str(ball.value))
 ball.reset()
-check("reset puts the needle back to where it knows nothing",
+check("reset puts the bar back to where it knows nothing",
       ball.value is None and ball.peak is None)
 
 # Rising: the recommended 10 ms attack, so 63% of a step arrives in 10 ms.
@@ -695,18 +702,18 @@ ball = smeter.Ballistics()
 ball.update(-90.0, 0.05)
 for _ in range(45):                      # 45 x 45 ms: one window repaint rate
     ball.update(-150.0, 0.045)
-check("the needle is still visibly falling two seconds after the signal went",
+check("the bar is still visibly falling two seconds after the signal went",
       -150.0 < ball.value < -105.0, f"{ball.value:.1f} dB of -150 dBm")
 check("the fall is slower than the rise, as a meter's is",
       smeter.Ballistics().decay > 10 * smeter.Ballistics().attack,
       f"attack {smeter.Ballistics().attack:g} s, decay {smeter.Ballistics().decay:g} s")
 
-# Peak hold: a spike between repaints must still be seen on the peak needle.
+# Peak hold: a spike between repaints must still be seen on the peak marker.
 ball = smeter.Ballistics()
 ball.update(-100.0, 0.045)
 for _ in range(20):
     ball.update(-70.0 if _ == 3 else -100.0, 0.001)
-check("a spike shorter than the needle's own rise is still caught by the peak",
+check("a spike shorter than the bar's own rise is still caught by the peak",
       abs(ball.peak + 70.0) < 0.01, f"peak {ball.peak:.2f} of a -70 dBm spike")
 value_at_hold = ball.value
 for _ in range(49):                      # 490 ms: still inside the half second
@@ -716,7 +723,7 @@ check("the peak is held for the half second Icom documents",
       f"peak {ball.peak:.2f} dB after 0.49 s")
 for _ in range(60):                      # and then it starts to fall away
     ball.update(-100.0, 0.01)
-check("and then it falls away towards the needle",
+check("and then it falls away towards the bar",
       ball.peak > ball.value + 5.0 and ball.peak < -71.0,
       f"peak {ball.peak:.1f} vs needle {ball.value:.1f} dBm")
 ball = smeter.Ballistics()
@@ -925,6 +932,21 @@ check("a band is found by frequency",
       bands.find_band(7_030_000).name == "40m"
       and bands.find_band(9_600_000).name == "31m")
 check("a frequency in no band returns None", bands.find_band(13_000_000) is None)
+check("a window marks every band it touches, lowest first",
+      [b.name for b in bands.bands_in_view(1_900_000, 3_600_000)]
+      == ["160m", "120m", "90m", "80m"],
+      ", ".join(b.name for b in bands.bands_in_view(1_900_000, 3_600_000)))
+check("overlapping bands are both marked",
+      [b.name for b in bands.bands_in_view(6_900_000, 7_500_000)]
+      == ["40m", "41m"],
+      ", ".join(b.name for b in bands.bands_in_view(6_900_000, 7_500_000)))
+check("a window between the bands marks nothing",
+      bands.bands_in_view(12_900_000, 13_400_000) == [],
+      repr(bands.bands_in_view(12_900_000, 13_400_000)))
+check("a band that ends exactly at the edge of the window is still marked",
+      [b.name for b in bands.bands_in_view(7_300_000, 7_300_000)]
+      == ["40m", "41m"],
+      ", ".join(b.name for b in bands.bands_in_view(7_300_000, 7_300_000)))
 check("a band's centre is its midpoint",
       bands.find_band(3_700_000).centre == 3_750_000.0)
 check("ham and shortwave bands are ordered and non-overlapping",

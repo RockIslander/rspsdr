@@ -279,10 +279,16 @@ def main() -> int:
           shown.x() >= scr.x() - 1 and shown.y() >= scr.y() - 1
           and shown.width() <= scr.width() + 1,
           f"frame at +{shown.x()}+{shown.y()} {shown.width()}x{shown.height()}")
-    check("window can be much smaller than the screen",
-          win.minimumSizeHint().width() <= 600,
-          f"content minimum width {win.minimumSizeHint().width()} px, "
-          f"explicit minimum {win.minimumWidth()} px")
+    # The content's own minimum width has to fit inside the narrowest window
+    # the application allows.  A row wider than that one is a control nobody can
+    # reach: Qt holds the window at its floor and clips the row off the side.
+    # (What the window cannot go below is the tuning row: the dial is set in
+    # 28 pt type, on a box wide enough for the whole reading, and the row wraps
+    # rather than forcing the window wider than the floor allows.)
+    check("the window's content fits inside the narrowest window it allows",
+          win.minimumSizeHint().width() <= ui.MIN_WIDTH,
+          f"content minimum width {win.minimumSizeHint().width()} px against "
+          f"the window's own floor of {ui.MIN_WIDTH} px")
 
     # The rows wrap between *items*, so a caption added separately from the
     # control it names can be left dangling at the end of one line while the
@@ -635,28 +641,47 @@ def main() -> int:
 
         # A window showing the rows cannot be shorter than they are: Qt would
         # otherwise squeeze the picture down to nothing and cut the rows off at
-        # the bottom edge, where nothing says they are there at all.
+        # the bottom edge, where nothing says they are there at all.  The rows
+        # above the picture are short now -- the meter is one 38 px strip, where
+        # it was 222 px of dial and bar -- so what is asked about by name is the
+        # strip itself, the reading beside it and the frequency: the three
+        # things that must never be squeezed out of the window.
+        def clipped(names) -> list[str]:
+            return [name for name, wdg in names if not inside_window(wdg, win)]
+
         win.resize(780, 560)
         settle()
         open_floor = win.height()
-        out_of_reach = [name for name, wdg in (("zoom +", win.btn_zoom_in),
-                                               ("zoom Fit", win.btn_zoom_fit),
-                                               ("Detail", win.cmb_wfdetail),
-                                               ("Theme", win.cmb_theme),
-                                               ("S9 at", win.spn_sref))
-                        if not inside_window(wdg, win)]
+        open_clipped = clipped((("zoom +", win.btn_zoom_in),
+                                ("zoom Fit", win.btn_zoom_fit),
+                                ("Detail", win.cmb_wfdetail),
+                                ("Theme", win.cmb_theme),
+                                ("S9 at", win.spn_sref),
+                                ("CW pitch", win.spn_pitch),
+                                ("Clear peak", win.btn_clear),
+                                ("meter", win.meter),
+                                ("reading", win.lbl_smeter),
+                                ("frequency", win.spn_freq)))
         pane.set_folded(True)
         settle()
         folded_at = win.height()
         win.resize(780, 560)
         settle()
         folded_floor = win.height()
+        folded_clipped = clipped((("meter", win.meter),
+                                  ("reading", win.lbl_smeter),
+                                  ("frequency", win.spn_freq),
+                                  ("device", win.lbl_device),
+                                  ("Start", win.btn_start),
+                                  ("fold button", pane.btn_fold)))
         check("the window will not shrink past the controls it is showing",
-              folded_floor == 560 and open_floor > folded_floor
-              and not out_of_reach and win.height() >= win.minimumHeight(),
+              folded_floor >= ui.FOLDED_MIN_HEIGHT and open_floor > folded_floor
+              and not open_clipped and not folded_clipped
+              and win.height() >= win.minimumHeight(),
               f"unfolded {open_floor} px, folded {folded_floor} px "
-              f"(was {folded_at}), floor {win.minimumHeight()} px; out of "
-              f"reach: {', '.join(out_of_reach) or 'none'}")
+              f"(was {folded_at}), floor {win.minimumHeight()} px, never "
+              f"under {ui.FOLDED_MIN_HEIGHT}; out of reach: "
+              f"{', '.join(open_clipped + folded_clipped) or 'none'}")
         pane.set_folded(False)
         win.resize(was)
         settle()
@@ -1191,15 +1216,32 @@ def main() -> int:
             rows_before, cols_before = win.waterfall.rows(), win.waterfall.cols()
             px_before = plot_pixels()
             above, below = split.sizes()          # [spectrum, waterfall]
-            split.setSizes([max(140, above - 90), below + 90])
+            # One row per pixel, in the harshest form the invariant takes: put
+            # the tuning aid at its floor and then at its ceiling, and the rows
+            # have to change by exactly what the spectrum took.  (Taking the
+            # height off the *spectrum* rather than off the window is what the
+            # divider does, and it only changes anything while the spectrum has
+            # height to give -- at the floor it has none.)
+            # The sizes are what the two plots will actually get, not wishes:
+            # sum() has to be the height there is, or Qt scales the pair down
+            # to fit and the spectrum never leaves its floor.
+            total = sum(split.sizes())
+            split.setSizes([ui.SPECTRUM_MIN_H, total - ui.SPECTRUM_MIN_H])
+            QApplication.processEvents()
+            most, low_spect = win.waterfall.rows(), win.spectrum.height()
+            split.setSizes([ui.SPECTRUM_MAX_H, total - ui.SPECTRUM_MAX_H])
+            QApplication.processEvents()
+            few, tall_spect = win.waterfall.rows(), win.spectrum.height()
+            check("a shorter spectrum is a taller waterfall, one row per pixel",
+                  most > few
+                  and abs((most - few) - (tall_spect - low_spect)) <= 2,
+                  f"spectrum {low_spect} px -> {most} rows, {tall_spect} px -> "
+                  f"{few} rows (the divider was at {above}/{below})")
             # Width decides the columns, so widen the window too -- unless it is
             # already as wide as the screen, in which case the invariant is all
             # there is to check.
             win.resize(min(win.width() + 120, 1900), win.height())
             QApplication.processEvents()
-            check("a taller plot means more rows of history",
-                  win.waterfall.rows() > rows_before,
-                  f"{rows_before} -> {win.waterfall.rows()} rows")
             fake_frame(16384, -80.0)              # bins to spare: width decides
             check("and Screen tracks whatever width the plot ended up with",
                   win.waterfall.cols() == min(16384, plot_pixels())
@@ -1703,38 +1745,71 @@ def main() -> int:
               "cursor" in win.lbl_cursor.text() and "MHz" in win.lbl_cursor.text(),
               repr(win.lbl_cursor.text()))
 
-        # ---- the analogue signal meter ---------------------------------
-        # It is fed from the receiver running in this window, and its face is
-        # painted by hand: what it reads and where it draws the needle are two
-        # different questions, and both are asked here.
-        live = win.smeter.reading_text()
+        # ---- the signal meter ------------------------------------------
+        # One meter, and it is a bar.  It used to be an analogue dial with a
+        # needle -- 222 px of instrument in the corner of the picture, with a
+        # horizontal bar under it saying the same thing -- and the needle is
+        # gone: the window's height is what the waterfall is made of, and the
+        # bar is that same reading on that same scale in the form that costs one
+        # 38 px strip.  What is asked here is what an operator asks of a meter:
+        # does it read the live signal, does the light end where the scale says,
+        # and what does it cost the picture.
+        live = win.meter.reading_text()
         check("the meter reads the live signal",
               live not in ("", "--") and win.lbl_smeter.text().startswith(live),
-              f"the face says {live!r} ({win.smeter.level_dbfs:.1f} dBFS with S9 "
-              f"at {win.smeter.ref_dbfs:g} dBFS)")
-        check("and sits in the window at its own size",
-              win.smeter.isVisible() and win.smeter.width() == ui.smeter.WIDTH
-              and win.smeter.height() == ui.smeter.HEIGHT,
-              f"{win.smeter.width()}x{win.smeter.height()} px")
-        # Where it is, as geometry: the top right of the display, above the
-        # waterfall -- and above the spectrum, which is above the waterfall.
-        # That placement is the whole of the change, so it is checked as
-        # positions rather than as membership of some row.
-        meter_at = win.smeter.mapTo(win, QPoint(0, 0))
+              f"the bar says {live!r} ({win.meter.level_dbfs:.1f} dBFS with S9 "
+              f"at {win.meter.ref_dbfs:g} dBFS)")
+        check("there is one meter in the window, and it is the bar",
+              len(win.findChildren(ui.SignalMeter)) == 1
+              and win.meter is win.findChild(ui.SignalMeter)
+              and not hasattr(win, "smeter") and not hasattr(win, "barmeter"),
+              f"{len(win.findChildren(ui.SignalMeter))} meter widget(s), and "
+              "no second one beside a dial")
+        # It is a strip in the row above the picture, and it takes that row's
+        # whole width: a bar is read by its length, so the width the dial's
+        # corner used to take is the meter's now, and the figures are beside it
+        # rather than under a face.
+        meter_at = win.meter.mapTo(win, QPoint(0, 0))
         spectrum_at = win.spectrum.mapTo(win, QPoint(0, 0))
-        check("the meter is the top right corner, above the waterfall",
-              meter_at.y() + win.smeter.height() <= spectrum_at.y()
-              and meter_at.x() > win.width() // 2
-              and meter_at.x() + win.smeter.width() >= win.width() - 16,
-              f"meter +{meter_at.x()}+{meter_at.y()} "
-              f"{win.smeter.width()}x{win.smeter.height()} in "
-              f"{win.width()}x{win.height()}, spectrum starts at y "
+        check("the meter is a strip across the row above the picture",
+              win.meter.isVisible()
+              and win.meter.height() == ui.smeter.BAR_HEIGHT
+              and meter_at.y() + win.meter.height() <= spectrum_at.y()
+              and meter_at.x() <= 8
+              and win.lbl_smeter.isVisible()
+              and win.lbl_smeter.mapTo(win, QPoint(0, 0)).x()
+              >= meter_at.x() + win.meter.width(),
+              f"bar {win.meter.width()}x{win.meter.height()} at "
+              f"+{meter_at.x()}+{meter_at.y()}, readout at "
+              f"+{win.lbl_smeter.mapTo(win, QPoint(0, 0)).x()}, in "
+              f"{win.width()}x{win.height()}; spectrum starts at y "
               f"{spectrum_at.y()}")
-        check("and is no longer buried in the gain row",
-              not win.settings_pane.body.isAncestorOf(win.smeter)
+        # ... and it is the width *of the row*, not 472 px of glass: a bar grows
+        # with the window, which is the whole reason for giving it the row.
+        def relayout(times: int = 3):
+            """Let the layout follow a resize before its geometry is read."""
+            for _ in range(times):
+                QApplication.processEvents()
+                win.centralWidget().layout().activate()
+
+        was_wide = win.width()
+        win.resize(was_wide - 160, win.height())
+        relayout()
+        narrow = win.meter.width()
+        win.resize(was_wide, win.height())
+        relayout()
+        check("the bar takes the width the row gives it, and gives it back",
+              narrow < win.meter.width() - 100
+              and win.meter.width() + win.lbl_smeter.width()
+              >= win.width() - 40,
+              f"{win.meter.width()} px of bar and {win.lbl_smeter.width()} px "
+              f"of figures fill a {win.width()} px window; the bar was "
+              f"{narrow} px in a {was_wide - 160} px one")
+        check("and it is out of the settings rows, with its calibration in them",
+              not win.settings_pane.body.isAncestorOf(win.meter)
               and win.settings_pane.body.isAncestorOf(win.spn_sref),
-              "the meter is out of the rows; its calibration stayed with the "
-              "settings")
+              "the meter is in the row above the picture; its calibration is "
+              "with the settings")
 
         # Through the controls, not the methods behind them: the calibration,
         # the peak switch and the face all have to reach the widget.
@@ -1742,67 +1817,119 @@ def main() -> int:
         win.chk_speak.setChecked(True)
         win.cmb_sface.setCurrentIndex(win.cmb_sface.findData("dark"))
         check("the meter's own controls reach it",
-              (win.smeter.ref_dbfs, win.smeter.peak_on, win.smeter.face)
+              (win.meter.ref_dbfs, win.meter.peak_on, win.meter.face)
               == (ui.smeter.DEFAULT_REF_DBFS, True, "dark"),
-              f"S9 at {win.smeter.ref_dbfs:g} dBFS, peak {win.smeter.peak_on}, "
-              f"face {win.smeter.face!r}")
+              f"S9 at {win.meter.ref_dbfs:g} dBFS, peak {win.meter.peak_on}, "
+              f"face {win.meter.face!r}")
 
         def level_for(dbm):
             """The dBFS that reads a given dBm on this calibration."""
-            return dbm - ui.smeter.S9_DBM + win.smeter.ref_dbfs
+            return dbm - ui.smeter.S9_DBM + win.meter.ref_dbfs
 
-        # A needle is a line drawn by hand, so "it points where the scale says"
-        # is a question about pixels: the red ones have to be where the geometry
-        # puts the tip, either side of the middle of the dial.
-        for dbm, side in ((-53.0, "right"), (-100.0, "left")):
-            win.smeter.reset()
-            win.smeter.feed(level_for(dbm), 0.045)
-            red = needle_mask(face_pixels(win.smeter))
-            cols = np.nonzero(red.any(axis=0))[0]
-            tip = win.smeter.needle()[2]
-            end = int(cols.max()) if side == "right" else int(cols.min())
-            check(f"the needle is drawn {side} of centre, where the scale puts it",
-                  int(red.sum()) > 40 and cols.size > 8 and abs(end - tip) <= 4,
-                  f"{win.smeter.reading_text()} ({dbm:+.0f} dBm): "
-                  f"{int(red.sum())} red pixels over x {cols.min()}..{cols.max()}, "
-                  f"the geometry says the tip is at {tip:.1f} "
-                  f"of {win.smeter.width()}")
+        def bar_fill(a):
+            """The filled trough's columns: the only red thing on the strip."""
+            return np.nonzero(needle_mask(a).any(axis=0))[0]
 
-        # The peak marker is a second, shorter needle that stays where the level
-        # was while the first one falls away.
-        win.smeter.reset()
-        win.smeter.feed(level_for(-53.0), 0.045)
+        # A bar is a picture of a number, so "does it fill where the scale says"
+        # is a question about pixels.  Asked at the marks themselves, because
+        # that is where the scale is exact: S1, S5 and S9 are marks, and S9+40
+        # is one of the standard's 10 dB steps above them.
+        marks = {"S1": ui.smeter.dbm_for_s(1),
+                 "S5": ui.smeter.dbm_for_s(5),
+                 "S9": ui.smeter.S9_DBM,
+                 "S9+40": ui.smeter.S9_DBM + 40.0}
+        off = []
+        for label, dbm in marks.items():
+            win.meter.reset()
+            win.meter.feed(level_for(dbm), 0.045)
+            cols = bar_fill(face_pixels(win.meter))
+            tip = win.meter.tip()
+            if cols.size < 20 or abs(int(cols.max()) - tip) > 4:
+                off.append(f"{label} fills to "
+                           f"{cols.max() if cols.size else '-'} of {tip:.1f}")
+        where = []
+        for name, dbm in marks.items():
+            px = win.meter.bar.x(dbm, ui.smeter.BAR_EDGE,
+                                 win.meter.width() - 2.0 * ui.smeter.BAR_EDGE)
+            where.append(f"{name} {px:.0f} px")
+        check("the light ends where the scale puts S1, S5, S9 and S9+40",
+              not off, "; ".join(off) or
+              ", ".join(where) + f" across {win.meter.width()} px")
+
+        # Only what is above the rest stop is lit: with nothing measured, the
+        # strip is dark from end to end, and it is the same scale at every
+        # level rather than one that re-scales itself to what it can see.
+        win.meter.reset()
+        check("with nothing measured the strip is dark and the reading says so",
+              win.meter.reading_text() == "--"
+              and bar_fill(face_pixels(win.meter)).size == 0,
+              f"{bar_fill(face_pixels(win.meter)).size} lit columns, "
+              f"reading {win.meter.reading_text()!r}")
+
+        # The peak marker: a line where the level was, kept while the fill falls
+        # away from it -- and given up when the switch says so.
+        win.meter.reset()
+        win.meter.feed(level_for(-53.0), 0.045)
         for _ in range(8):                        # 360 ms: inside the half second
-            win.smeter.feed(level_for(-140.0), 0.045)
-        face = face_pixels(win.smeter)
-        red = np.nonzero(needle_mask(face).any(axis=0))[0]
+            win.meter.feed(level_for(-140.0), 0.045)
+        face = face_pixels(win.meter)
         yellow = np.nonzero(peak_mask(face).any(axis=0))[0]
-        check("the peak marker holds the level the needle has left behind",
-              yellow.size > 10 and red.size > 10 and yellow.any()
-              and abs(int(yellow.max()) - win.smeter.peak_needle()[2]) <= 4
+        red = bar_fill(face)
+        check("the peak marker holds the level the fill has left behind",
+              yellow.size >= 2 and int(peak_mask(face).sum()) > 20
+              and red.size > 3
+              and abs(int(yellow.max()) - win.meter.peak_tip()) <= 4
               and red.max() < yellow.max() - 20,
-              f"peak {win.smeter.peak_dbm:+.0f} dBm at x {yellow.max() if yellow.size else '-'} "
-              f"(geometry {win.smeter.peak_needle()[2]:.1f}), needle "
-              f"{win.smeter.dbm:+.0f} dBm at x {red.max() if red.size else '-'}")
+              f"peak {win.meter.peak_dbm:+.0f} dBm at x "
+              f"{yellow.max() if yellow.size else '-'} (geometry "
+              f"{win.meter.peak_tip():.1f}), the fill reaches "
+              f"{red.max() if red.size else '-'} of {win.meter.width()}")
+        win.chk_speak.setChecked(False)
+        app.processEvents()
+        check("and gives it up when the peak marker is switched off",
+              win.meter.peak_tip() is None
+              and peak_mask(face_pixels(win.meter)).sum() == 0,
+              f"peak tip {win.meter.peak_tip()}, "
+              f"{peak_mask(face_pixels(win.meter)).sum()} yellow px left")
+        win.chk_speak.setChecked(True)
 
         # Both faces are painted from a table, so switching has to change the
-        # picture -- and half of the table is which way round it is.
-        win.smeter.reset()
-        dark = face_pixels(win.smeter)
+        # picture -- and the fill has to be drawn on either of them.
+        win.meter.reset()
+        win.meter.feed(level_for(-73.0), 0.045)
+        dark = face_pixels(win.meter)
         win.cmb_sface.setCurrentIndex(win.cmb_sface.findData("cream"))
-        cream = face_pixels(win.smeter)
+        cream = face_pixels(win.meter)
         win.cmb_sface.setCurrentIndex(win.cmb_sface.findData("dark"))
-        check("the cream face is a light dial and the dark one a dark one",
-              dark[:, :, :3].mean() < 60 and cream[:, :, :3].mean() > 150,
-              f"the dark face averages {dark[:, :, :3].mean():.0f} of 255, "
+        check("the cream face is a light strip and the dark one a dark one",
+              dark[:, :, :3].mean() < 80 and cream[:, :, :3].mean() > 140,
+              f"the dark strip averages {dark[:, :, :3].mean():.0f} of 255, "
               f"the cream one {cream[:, :, :3].mean():.0f}")
-        check("... and the needle is drawn on both of them",
-              needle_mask(dark).sum() > 40 and needle_mask(cream).sum() > 40,
-              f"{needle_mask(dark).sum()} red pixels on the dark face, "
-              f"{needle_mask(cream).sum()} on the cream one")
+        check("... and the fill is drawn on both of them",
+              bar_fill(dark).size > 20 and bar_fill(cream).size > 20,
+              f"{bar_fill(dark).size} lit columns on the dark face, "
+              f"{bar_fill(cream).size} on the cream one")
 
-        # With the receiver stopped the needle has nowhere to stand: it falls
-        # back to its rest and the face stops claiming a reading, rather than
+        # The tuned frequency is the one number in this window that is read from
+        # across the room, so it is set in the largest type here -- and the box
+        # has to be wide enough for the whole of it, or the last digit of a
+        # frequency is the thing that gets lost.
+        other_readouts = {"band": win.lbl_band, "zoom": win.lbl_zoom,
+                          "IF": win.lbl_if, "header": win.lbl_app}
+        check("the tuned frequency is set in the largest type in the window",
+              win.spn_freq.font().pointSize()
+              > max(w.font().pointSize() for w in other_readouts.values()),
+              f"{win.spn_freq.font().pointSize()} pt against "
+              + ", ".join(f"{name} {w.font().pointSize()}"
+                          for name, w in other_readouts.items()))
+        text = win.spn_freq.text()
+        wide = win.spn_freq.fontMetrics().horizontalAdvance(text)
+        check("and the whole reading fits its box, to the last digit",
+              wide + 12 <= win.spn_freq.width(),
+              f"{text!r} is {wide} px in a {win.spn_freq.width()} px box")
+
+        # With the receiver stopped the bar has nothing to stand on: it falls
+        # back to rest and the strip stops claiming a reading, rather than
         # freezing at the last thing that was heard.
         def pump(seconds):
             t0 = time.monotonic()
@@ -1812,16 +1939,15 @@ def main() -> int:
 
         win.btn_start.click()
         pump(1.2)
-        red = needle_mask(face_pixels(win.smeter))
-        rest_tip = win.smeter.needle()[2]
-        check("stopping the receiver lets the needle fall back to rest",
-              win.smeter.reading_text() == "--"
+        red = bar_fill(face_pixels(win.meter))
+        check("stopping the receiver lets the bar fall back to rest",
+              win.meter.reading_text() == "--"
               and "no signal reading" in win.lbl_smeter.text()
-              and red.any() and abs(int(np.nonzero(red.any(axis=0))[0].min())
-                                    - rest_tip) <= 4,
-              f"{int(red.sum())} red pixels with the tip at "
-              f"{np.nonzero(red.any(axis=0))[0].min() if red.any() else '-'} "
-              f"(rest is {rest_tip:.1f} of {win.smeter.width()}), the face says "
+              and (red.size == 0
+                   or int(red.max()) <= ui.smeter.BAR_EDGE + 2),
+              f"{red.size} lit columns, reaching "
+              f"{red.max() if red.size else 0} of {win.meter.width()} "
+              f"(rest is {ui.smeter.BAR_EDGE:g}); the readout says "
               f"{win.lbl_smeter.text()!r}")
         win.btn_start.click()
         t0 = time.monotonic()

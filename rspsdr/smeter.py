@@ -1,4 +1,4 @@
-"""The signal meter: the scale, the dial and the needle's ballistics.
+"""The signal meter: the scale, the bar that shows it, and the ballistics.
 
 Three separate things live here, and keeping them apart is what makes the meter
 checkable.
@@ -6,22 +6,31 @@ checkable.
 **The scale is the IARU recommendation**, which is the only definition of an S
 unit there is: S9 is -73 dBm, i.e. 50 uV RMS into 50 ohms at the receiver input;
 each S unit below it is 6 dB, so S1 is -121 dBm; and above S9 the standard's
-steps are 10 dB, so the dial ends at S9+60, -13 dBm.  That is plain arithmetic
+steps are 10 dB, so the scale ends at S9+60, -13 dBm.  That is plain arithmetic
 over a level in dBm, and :func:`reading` turns it into the words an operator
 would say ("S9 +20 dB").  What the recommendation does *not* define is the
 artwork, and nothing here pretends to: see below.
 
-**The dial is the printed-dial convention of the radios this is modelled on.**
-The marks are spaced evenly around the arc -- S1 to S9 across the left half, the
-dB-over-S9 marks across the right -- which is what those faces look like, and
-which is deliberately *not* linear in dB: the top end of a real S-meter dial is
-compressed, and reproducing that is the point of drawing one.  The consequence
-is that the dial resolves a level to about 1.5 dB in the S region and 2.5 dB
-above S9 rather than exactly, so the exact figure is also given as text
-(:func:`reading`) and the needle position is never the only thing on offer.
+**The bar is that scale drawn as a strip** (:class:`Bar`).  It fills to the
+position of the level on the scale, and the scale's marks are drawn across it
+keeping the printed-dial convention: evenly spaced *by mark* rather than linear
+in dB, so S1 to S9 take the first three fifths of the strip and the 10 dB steps
+above S9 the rest, and the top of the scale is compressed the way a printed face
+is.  That is what an S-meter looks like and what a transceiver's bar meter looks
+like, and reproducing it is the point.  The consequence is that the strip
+resolves a level to the distance between two marks -- 3 dB in the S region, 5 dB
+above S9 -- so the exact figure is also given as text beside it (:func:`reading`)
+and the bar is never the only thing on offer.
+
+An arc with a needle over it used to be drawn above the bar, on this same scale.
+It was removed for the picture's sake: the bar carries what the instrument is for
+-- where the signal is on the IARU scale, and where the peak of it was -- in 38 px
+of height instead of 222, and the waterfall that height paid for is the thing
+being watched.  What only the needle could do, being read to half a mark, the
+figures beside the bar do better.
 
 **The ballistics are the recommended quasi-peak ones**: a 10 ms attack and a
-500 ms decay time constant, with a peak-hold needle that keeps a maximum for
+500 ms decay time constant, with a peak-hold marker that keeps a maximum for
 half a second and then falls away slowly (the half second is Icom's own
 documented figure for the peak segment on their digital meters).
 
@@ -35,7 +44,7 @@ is no power sensor on this device and the level is taken after the gain stages
 reads S9.  The default was chosen from measurements on a real RSP1 (2 MSps, a
 6 kHz AM passband, the default IF gain of 40 dB): a whole band of HF noise reads
 around S5-S7 from 60 m to 19 m, and 10 dB of gain shows as exactly 10 dB on the
-needle, which is what makes one calibration hold across a range.  Below that,
+bar, which is what makes one calibration hold across a range.  Below that,
 S1 is -121 dBm -- under this receiver's own noise floor even at its lowest gain,
 where the noise still reads S3.8 -- so the bottom of the scale is the
 calibration's business rather than the hardware's, and anyone with a known
@@ -54,22 +63,16 @@ S9_DBM = -73.0
 DB_PER_UNIT = 6.0
 DB_PER_STEP = 10.0
 S1_DBM = S9_DBM - 8.0 * DB_PER_UNIT              # -121 dBm
-TOP_STEP = 60                                    # the dial ends at S9+60
+TOP_STEP = 60                                    # the scale ends at S9+60
 
-# The dial runs a little below S1, so a needle with no signal at all rests
-# *below* the first mark instead of sitting on it, which is where a real one
-# sits.
-DIAL_LO_DBM = S1_DBM - DB_PER_UNIT               # -127 dBm
-DIAL_HI_DBM = S9_DBM + TOP_STEP                  # -13 dBm
+# The scale runs a little below S1, so a bar with no signal at all rests *below*
+# the first mark instead of sitting on it, and anything under it reads "S<1".
+SCALE_LO_DBM = S1_DBM - DB_PER_UNIT              # -127 dBm
+SCALE_HI_DBM = S9_DBM + TOP_STEP                 # -13 dBm
 
 # The level that reads S9, in dBFS of the demodulator's passband measurement.
 # Measured rather than assumed: see the module docstring.
 DEFAULT_REF_DBFS = -45.0
-
-# The meter's own size, in pixels.  A wide, shallow window over a needle whose
-# pivot is out of sight below it, which is the shape of every analogue meter.
-WIDTH = 236
-HEIGHT = 86
 
 
 def dbm_for_s(units: float) -> float:
@@ -98,23 +101,24 @@ def reading(dbm: float) -> str:
         return f"S9 +{float(dbm) - S9_DBM:.0f} dB"
     units = s_for_dbm(dbm)
     if units < 1.0:
-        # Below the first mark the needle is off the scale, and saying
-        # "S0.4" would be pretending to a resolution that is not there.
+        # Below the first mark the bar is off the scale, and saying "S0.4"
+        # would be pretending to a resolution that is not there.
         return "S<1"
     return f"S{units:.1f}"
 
 
-# --- the dial ----------------------------------------------------------
+# --- the scale ---------------------------------------------------------
 # One entry per printed tick: (dBm, label or None, whether it is a long tick).
 # Below S9 a tick every half unit (3 dB), numbered every whole one; above S9 a
 # tick every 5 dB, with the standard's 10 dB steps long and +20/+40/+60
-# numbered.  This is a dial, not a graph: the marks are what an operator reads,
-# and the spaces between them carry no information beyond "between these two".
+# numbered.  This is a meter's scale, not a graph: the marks are what an
+# operator reads, and the spaces between them carry no information beyond
+# "between these two".
 MARKS: list[tuple[float, str | None, bool]] = [
-    # The stop the needle rests on, one mark below S1 and no number: with no
-    # signal the needle sits here rather than on S1, which is where a real one
-    # sits, and anything below it reads off the scale.
-    (DIAL_LO_DBM, None, False),
+    # The stop the bar rests on, one mark below S1 and no number: with no
+    # signal it fills nothing rather than standing on S1, and anything below it
+    # reads off the scale.
+    (SCALE_LO_DBM, None, False),
 ]
 for _k in range(17):                      # S1 .. S9, half-unit ticks
     _dbm = S1_DBM + _k * (DB_PER_UNIT / 2.0)
@@ -124,109 +128,89 @@ for _k in range(1, 13):                   # S9 + 5 dB .. S9 + 60 dB
     _dbm = S9_DBM + _k * (DB_PER_STEP / 2.0)
     MARKS.append((_dbm, f"+{_k * 5}" if _k % 4 == 0 else None, _k % 2 == 0))
 
-# The needle's sweep, in degrees either side of vertical, and how far below the
-# window the pivot sits as a multiple of its height.  A large radius and a
-# distant pivot is what makes a meter's scale read as a shallow arc rather than
-# a dial, and it is why the needle enters the window almost vertically.
-START_DEG = -34.0
-SPAN_DEG = 68.0
-PIVOT_DROP = 1.5
 
+class Bar:
+    """Where a level sits on the scale, and where that is along the strip.
 
-class Dial:
-    """Where the needle points for a given level.
-
-    The marks are evenly spaced around the arc (by *mark*, the way a printed
-    dial is laid out) and a level between two of them is interpolated linearly
-    in dB, so the mapping is exact at every mark, monotonic, and continuous --
-    which is everything a needle can promise.
+    The scale is the printed-dial convention: the marks are evenly spaced (by
+    *mark*, the way a printed dial is laid out) and a level between two of them
+    is interpolated linearly in dB, so the mapping is exact at every mark,
+    monotonic and continuous -- which is everything a strip of light can
+    promise.  Kept here, outside the widget, so that "does the bar fill where the
+    scale says?" is arithmetic a test can ask without a display.
     """
 
-    def __init__(self, start_deg: float = START_DEG, span_deg: float = SPAN_DEG,
-                 marks: list[tuple[float, str | None, bool]] | None = None):
+    def __init__(self, marks: list[tuple[float, str | None, bool]] | None = None):
         self.marks = list(marks if marks is not None else MARKS)
-        self.start_deg = float(start_deg)
-        self.span_deg = float(span_deg)
-        self._step = (self.span_deg / (len(self.marks) - 1)
-                      if len(self.marks) > 1 else 0.0)
 
-    # -- the arc -----------------------------------------------------
-    def mark_angle(self, index: int) -> float:
-        """Angle of one mark, in degrees from vertical, positive to the right."""
-        return self.start_deg + index * self._step
+    def mark_position(self, index: int) -> float:
+        """Where one mark is drawn: 0 at the first, 1 at the last."""
+        last = max(1, len(self.marks) - 1)
+        return index / last
 
-    def angle(self, dbm: float) -> float:
-        """Angle for a level in dBm, clamped to the ends of the dial."""
+    def position(self, dbm: float) -> float:
+        """How far along the bar a level fills: 0 at the first mark, 1 at the
+        last.  Levels past either end stop there, as a meter's reading does."""
         lo = self.marks[0][0]
         hi = self.marks[-1][0]
         if dbm <= lo:
-            return self.mark_angle(0)
+            return 0.0
         if dbm >= hi:
-            return self.mark_angle(len(self.marks) - 1)
+            return 1.0
         for i in range(len(self.marks) - 1):
             a, b = self.marks[i], self.marks[i + 1]
             if a[0] <= dbm <= b[0]:
-                t = (dbm - a[0]) / (b[0] - a[0])
-                return self.mark_angle(i) + t * self._step
-        return self.mark_angle(len(self.marks) - 1)     # pragma: no cover
+                step = self.mark_position(i + 1) - self.mark_position(i)
+                return self.mark_position(i) + (dbm - a[0]) / (b[0] - a[0]) * step
+        return 1.0                                     # pragma: no cover
 
-    def dbm_at_angle(self, angle: float) -> float:
-        """The level a given needle angle means -- the inverse of :meth:`angle`."""
-        if angle <= self.mark_angle(0):
-            return self.marks[0][0]
-        last = len(self.marks) - 1
-        if angle >= self.mark_angle(last):
-            return self.marks[last][0]
-        i = int((angle - self.start_deg) / self._step)
-        i = max(0, min(i, last - 1))
-        t = (angle - self.mark_angle(i)) / self._step
-        a, b = self.marks[i][0], self.marks[i + 1][0]
-        return a + t * (b - a)
+    def x(self, dbm: float, left: float, width: float) -> float:
+        """The pixel the bar reaches for a level, in ``left`` .. ``left+width``."""
+        return left + self.position(dbm) * float(width)
 
     def resolution_db(self, dbm: float) -> float:
-        """dB between neighbouring marks at this level: the dial's own limit.
+        """dB between neighbouring marks at this level: the scale's own limit.
 
-        Half of it is the finest a needle position can be read to, which is the
-        honest accuracy of the moving-coil instrument this is a picture of.
+        Half of it is the finest a bar can be read to, which is the honest
+        accuracy of the instrument -- which is why the exact figure is printed
+        beside it as well.
         """
-        lo = self.marks[0][0]
-        hi = self.marks[-1][0]
-        dbm = min(max(dbm, lo), hi)
+        dbm = min(max(dbm, self.marks[0][0]), self.marks[-1][0])
         for i in range(len(self.marks) - 1):
             if self.marks[i][0] <= dbm <= self.marks[i + 1][0]:
                 return self.marks[i + 1][0] - self.marks[i][0]
         return self.marks[1][0] - self.marks[0][0]      # pragma: no cover
 
 
-def needle_geometry(rect_w: float, rect_h: float, angle_deg: float,
-                    radius_frac: float = 1.0) -> tuple[float, float, float, float]:
-    """The visible needle: a line from the pivot to a point on the arc.
-
-    Coordinates are the widget's own, origin top-left, with the pivot below the
-    bottom edge -- so the caller draws only the part that is inside the window,
-    exactly as a real meter's needle is only visible through its glass.
-    Returns ``(x_pivot, y_pivot, x_tip, y_tip)``.
-    """
-    cx = rect_w / 2.0
-    pivot_y = rect_h * (1.0 + PIVOT_DROP)
-    # The arc sits a fixed fraction of the way down the window, which is what
-    # the ticks are drawn along and what the tip of the needle reaches.
-    radius = (pivot_y - 0.14 * rect_h) * float(radius_frac)
-    rad = math.radians(angle_deg)
-    return (cx, pivot_y,
-            cx + radius * math.sin(rad),
-            pivot_y - radius * math.cos(rad))
+# --- the strip's own sizes, in pixels ----------------------------------
+# The bar is drawn at the size it is drawn at -- there is no second size to
+# scale from and nothing to keep in step -- and it takes whatever width the
+# window gives it, from its minimum up.  Everything here is either the height of
+# a band in the widget or the width of a line.
+BAR_HEIGHT = 38                 # the widget: the trough and the numbers under it
+BAR_MIN_WIDTH = 320             # what is left for it at the narrowest window
+BAR_TRACK = 18.0                # the depth of the filled trough
+BAR_EDGE = 8.0                  # the gap from the glass to its ends
+BAR_TOP = 3.0                   # and from the top of the glass to its top
+BAR_R = 3.0                     # the trough's corner radius
+BAR_GLASS_R = 6.0               # the glass's
+BAR_BEZEL_W = 1.4
+BAR_MARK_W = (1.4, 0.8)         # (long mark, short mark)
+BAR_PEAK_W = 1.5
+BAR_SHORT = 6.0                 # how far a short mark reaches up into the trough
+BAR_DARKEN = 150                # the trough is the face's colour, darkened
+BAR_TYPE_PT = 10                # the numbers under the trough
 
 
 class Ballistics:
-    """The needle's response: how fast it rises, how slowly it falls.
+    """The meter's response: how fast it rises, how slowly it falls.
 
     An exponential integrator on the level in dB, with the recommended quasi-peak
-    constants -- a 10 ms attack, a 500 ms decay -- and a peak-hold needle that
+    constants -- a 10 ms attack, a 500 ms decay -- and a peak-hold marker that
     keeps the highest level of the last half second before it starts to fall.
 
     Deliberately fed by explicit time steps rather than by a clock: the tests
-    drive it at 1 ms and can say what the needle does in the first ten, and the
+    drive it at 1 ms and can say what the bar does in the first ten, and the
     window drives it at its repaint rate with the time it really took.
     """
 
@@ -249,7 +233,7 @@ class Ballistics:
         """Advance by ``dt`` seconds towards ``target``; returns (value, peak)."""
         dt = max(0.0, float(dt))
         if self.value is None:
-            # First sample: come straight to it.  A needle that had to travel
+            # First sample: come straight to it.  A meter that had to travel
             # from its rest position would show a slow rise that never happened.
             self.value = float(target)
             self.peak = float(target)
@@ -261,10 +245,10 @@ class Ballistics:
         self.value += (float(target) - self.value) * alpha
 
         if float(target) > self.peak or self.peak is None:
-            # The peak needle follows the *level*, not the needle: a signal
-            # that is gone again before the needle has finished rising would
-            # otherwise leave no trace of itself on the peak either, which is
-            # the one thing a peak hold is for.
+            # The peak marker follows the *level*, not the bar: a signal that is
+            # gone again before the bar has finished rising would otherwise
+            # leave no trace of itself on the peak either, which is the one
+            # thing a peak hold is for.
             self.peak = float(target)
             self._hold_left = self.peak_hold
         elif self._hold_left > 0.0:
@@ -284,16 +268,14 @@ class Ballistics:
 # default because the rest of this window is dark.
 FACES: dict[str, dict[str, str]] = {
     "dark": {
-        "face": "#12161b",          # the dial itself
+        "face": "#12161b",          # the glass the strip is set in
         "face2": "#1b222a",         # the sheen across it
         "bezel": "#3f88ad",
         "major": "#e8f1f7",
         "minor": "#8fa2b3",
         "number": "#e9f5ff",
-        "needle": "#e8362a",
-        "needle_edge": "#1a0b09",
+        "bar": "#e8362a",           # the filled strip
         "peak": "#ffd166",
-        "caption": "#7f97ab",
     },
     "cream": {
         "face": "#ded7c2",
@@ -302,10 +284,8 @@ FACES: dict[str, dict[str, str]] = {
         "major": "#17191c",
         "minor": "#6a6a63",
         "number": "#17191c",
-        "needle": "#b8231a",
-        "needle_edge": "#5a4038",
+        "bar": "#b8231a",
         "peak": "#2f6f4f",
-        "caption": "#5a5f68",
     },
 }
 FACE_NAMES = ("dark", "cream")
