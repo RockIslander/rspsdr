@@ -1,6 +1,6 @@
 """The window's colour schemes.
 
-Five of them, in one table, so that a colour is never written down twice: the
+Ten of them, in one table, so that a colour is never written down twice: the
 palette the widgets are filled from, the stylesheet the controls are styled
 with, the plots' own pens and backgrounds, and the handful of labels that used
 to carry a hard-coded hex value each.  ``rspsdr/ui.py`` is what puts one on the
@@ -62,6 +62,45 @@ THEMES: dict[str, dict[str, str | float]] = {
         "error": "#ffb0a0", "highlight": "#1f5d7a",
         "highlight_text": "#eaf6ff",
     },
+    # Deep indigo rather than blue-black: the night scheme's cooler cousin,
+    # with a lavender trace that reads as its own colour on the same plot.
+    "midnight": {
+        "window": "#0d1024", "panel": "#181d3a", "field": "#111530",
+        "text": "#e2e6ff", "muted": "#9099cc", "bright": "#f4f6ff",
+        "accent": "#a9b2ff", "peak": "#ffd479", "marker": "#ff7595",
+        "band": "#5b8fd8", "grid": "#5a6496", "grid_alpha": 0.22,
+        "plot": "#080a18", "border": "#2c3560",
+        "run": "#2a6f4f", "run_hover": "#348a61",
+        "stop": "#9c3a45", "stop_hover": "#b84a55",
+        "error": "#ff9aa6", "highlight": "#3a4a8f",
+        "highlight_text": "#eef1ff",
+    },
+    # Deep water: teal-black panels and an aqua trace, with a warm peak-hold
+    # so the two traces never read as one.
+    "ocean": {
+        "window": "#06141a", "panel": "#0c2229", "field": "#081b22",
+        "text": "#d8eef2", "muted": "#7fa9b0", "bright": "#eefcff",
+        "accent": "#2fd6c9", "peak": "#ffd479", "marker": "#ff6f6f",
+        "band": "#2f9e8f", "grid": "#3f7180", "grid_alpha": 0.20,
+        "plot": "#04100f", "border": "#1e4650",
+        "run": "#0f7a5c", "run_hover": "#159471",
+        "stop": "#9c3838", "stop_hover": "#b84848",
+        "error": "#ffa08f", "highlight": "#1b5563",
+        "highlight_text": "#eafcff",
+    },
+    # Dark plum with a bright violet trace; the peak and the marker keep warm
+    # colours, so the trace is the only purple thing on the plot.
+    "violet": {
+        "window": "#120a1c", "panel": "#1e112b", "field": "#170d23",
+        "text": "#ecdff7", "muted": "#a98bc2", "bright": "#fbf2ff",
+        "accent": "#c77dff", "peak": "#ffd479", "marker": "#ff7a9a",
+        "band": "#8a5cf0", "grid": "#6a4a85", "grid_alpha": 0.22,
+        "plot": "#0a0512", "border": "#3a2450",
+        "run": "#2a7a52", "run_hover": "#348f61",
+        "stop": "#9c3a48", "stop_hover": "#b84a58",
+        "error": "#ffa0b0", "highlight": "#4a2d6e",
+        "highlight_text": "#f6ecff",
+    },
     # An old valve set: a black dial with amber markings, which is also the
     # colour of the meter face it goes with.  The Start and Stop buttons keep
     # their green and red -- they say what they do -- but dimmed to sit under
@@ -104,6 +143,20 @@ THEMES: dict[str, dict[str, str | float]] = {
         "error": "#f0a094", "highlight": "#38505f",
         "highlight_text": "#eef3f7",
     },
+    # No hue at all beyond the marker: black, white and greys, for a display
+    # that is already showing colour elsewhere -- or for eyes that want the
+    # trace, the grid and nothing else.
+    "mono": {
+        "window": "#0d0d0d", "panel": "#1a1a1a", "field": "#141414",
+        "text": "#e8e8e8", "muted": "#9a9a9a", "bright": "#ffffff",
+        "accent": "#f2f2f2", "peak": "#cfcfcf", "marker": "#ff5a5a",
+        "band": "#8a8a8a", "grid": "#6a6a6a", "grid_alpha": 0.18,
+        "plot": "#060606", "border": "#3a3a3a",
+        "run": "#3f6b4f", "run_hover": "#4c8060",
+        "stop": "#7a3a3a", "stop_hover": "#944646",
+        "error": "#ff9a9a", "highlight": "#4a4a4a",
+        "highlight_text": "#ffffff",
+    },
     # Light, for a bright room, a laptop outdoors or a projector.  The trace
     # is a saturated blue rather than the pale cyan of the dark schemes: on a
     # white plot area a pale trace is the one thing that cannot be read.
@@ -118,19 +171,38 @@ THEMES: dict[str, dict[str, str | float]] = {
         "error": "#b3261e", "highlight": "#c3daf7",
         "highlight_text": "#0e2038",
     },
+    # Warm light, like a chart on cream paper.  Dark sepia ink and a burnt
+    # orange trace keep Daylight's contrast without its blue cast.
+    "paper": {
+        "window": "#f2ece1", "panel": "#e7dfd0", "field": "#fffdf7",
+        "text": "#2b2620", "muted": "#6f6455", "bright": "#402d14",
+        "accent": "#9a4a00", "peak": "#7a5a00", "marker": "#b3261e",
+        "band": "#3f7a5a", "grid": "#b9ab93", "grid_alpha": 0.35,
+        "plot": "#fbf7ee", "border": "#cbbfa9",
+        "run": "#2f6b46", "run_hover": "#3a8154",
+        "stop": "#a03030", "stop_hover": "#b84040",
+        "error": "#a3261e", "highlight": "#ddd0b8",
+        "highlight_text": "#3a2f1d",
+    },
 }
 
 # The order they are offered in: the default first, then alike-to-unlike, dark
 # before light.
-ORDER = ("night", "amber", "phosphor", "slate", "daylight")
+ORDER = ("night", "midnight", "ocean", "violet", "amber", "phosphor",
+         "slate", "mono", "paper", "daylight")
 DEFAULT = "night"
 
 # What the list shows: a name, and what to expect from it.
 LABELS: dict[str, tuple[str, str]] = {
     "night": ("Night", "near-black blue with a cyan trace"),
+    "midnight": ("Midnight", "deep indigo with a lavender trace"),
+    "ocean": ("Ocean", "deep sea teal with an aqua trace"),
+    "violet": ("Violet", "dark plum with a bright violet trace"),
     "amber": ("Amber", "a valve set: black dial, amber markings"),
     "phosphor": ("Phosphor", "green cathode-ray glow"),
     "slate": ("Slate", "neutral grey with one soft blue accent"),
+    "mono": ("Mono", "high-contrast black, white and grey"),
+    "paper": ("Paper", "warm light: sepia ink on cream"),
     "daylight": ("Daylight", "light -- for a bright room or a projector"),
 }
 

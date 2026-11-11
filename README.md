@@ -214,11 +214,15 @@ headless report prints. Switching the receiver off empties the bar
 rather than leaving it lit at the last signal, so a frozen
 reading can never be mistaken for a station still being heard.
 
-**The look of the window** — five colour schemes (**Theme**): *Night*, the
+**The look of the window** — ten colour schemes (**Theme**): *Night*, the
 default, is the near-black blue with a cyan trace the window has always had;
-*Amber* is a valve set, a black dial with amber markings; *Phosphor* is green
-cathode-ray glow; *Slate* is neutral grey with one soft blue accent; and
-*Daylight* is light, for a bright room, a laptop outdoors or a projector. One
+*Midnight* is deep indigo with a lavender trace; *Ocean* is teal-black with an
+aqua trace; *Violet* is dark plum with a bright violet trace; *Amber* is a valve
+set, a black dial with amber markings; *Phosphor* is green cathode-ray glow;
+*Slate* is neutral grey with one soft blue accent; *Mono* is black, white and
+greys with only the tuning marker in colour; *Paper* is warm light, sepia ink on
+cream; and *Daylight* is light, for a bright room, a laptop outdoors or a
+projector. One
 table sets the palette, the controls, the plots' own backgrounds and pens, the
 grid and the passband wash, so a scheme is a name rather than a dozen hex values
 scattered through two files. `--theme` opens in one without waiting to be
@@ -421,8 +425,9 @@ keeps the room it is promised.
 --nr/--nr-level      noise reduction on, and how hard (0..100)
 --ft8                decode FT8 headless and print it (see --freq as the dial)
 --mode ft8           open the GUI in FT8 mode, decoder armed
---theme NAME         open in a colour scheme (night, amber, phosphor,
-                     slate, daylight); default: the one last used
+--theme NAME         open in a colour scheme (night, midnight, ocean,
+                     violet, amber, phosphor, slate, mono, paper,
+                     daylight); default: the one last used
 --reset-settings     forget what was remembered; open on the defaults
 --memories           list saved memory channels, then exit
 --save-memory NAME   save the given frequency/mode as a memory channel

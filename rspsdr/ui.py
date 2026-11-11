@@ -1989,7 +1989,8 @@ class MainWindow(QMainWindow):
             "The window's colour scheme.  One table sets the palette, the "
             "controls, the plots and the labels, so everything that can be "
             "coloured follows this one choice.\n"
-            "Daylight is for a bright room or a projector; the rest are dark.")
+            "Daylight and Paper are for a bright room or a projector; the "
+            "rest are dark.")
         lay.addWidget(self._pair("Theme", self.cmb_theme))
 
         sep = QFrame()
