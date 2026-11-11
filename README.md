@@ -119,6 +119,7 @@ The radio starts automatically when the window opens.
 | Right-click | re-centre the spectrum there |
 | Mouse wheel over the spectrum | step the tuning up / down |
 | Mouse wheel over the waterfall | zoom the picture in / out |
+| `‹` `›` over the waterfall | page the view left / right by half a window |
 | `◀` `▶` buttons, or the dial box itself | step / type a frequency |
 | **Jump to band…** | 160 m … 6 m, and every shortwave metre band |
 | **Presets…** | WWV/CHU time signals, FT8 & WSPR calling frequencies, broadcasts |
@@ -243,7 +244,10 @@ very tall window and yields to the waterfall first in a short one, so what the
 divider really decides is how quickly the waterfall takes the rest. The
 frequency scale is drawn once, under the spectrum; the waterfall used to carry a
 second copy of it, 42 px of ruler a couple of hundred pixels below the first,
-and that strip is 42 rows of history now. At 1360x768 the window opens at
+and that strip is 42 rows of history now. The waterfall has no left-hand gutter
+either: its picture runs from one edge of the window to the other, where the 62
+px the old hidden axis held is picture now, and the `‹` and `›` buttons over its
+edges page the view half a window left or right. At 1360x768 the window opens at
 1280x728, and the waterfall gets 304 px of history with the settings on show and
 386 with them folded — where, before all of this, the needle meter and the
 second frequency scale left it 152.
@@ -390,9 +394,12 @@ measured here, sixteen 16384-point transforms of complex64 take 2.1 ms where
 receiver span, and 256x narrows it to a 7.8 kHz window at 2 MSps — 244 Hz at the
 lowest sample rate — in nine doubling steps. Use the **-** and **+** buttons to
 step up and down, **Fit** to go back to the whole span, the **Zoom** list to jump
-straight to a setting, or the mouse wheel over the waterfall. The label beside
-them shows the width you are looking at, in Hz, kHz or MHz as the window gets
-narrower ("500 kHz", then "244 Hz"), so it is clear what a click did.
+straight to a setting, or the mouse wheel over the waterfall. The `‹` and `›`
+buttons over the waterfall's edges page the view left and right by half a
+window without moving the dial, which is how the window is moved at the deep end
+of the ladder. The label beside them shows the width you are looking at, in Hz,
+kHz or MHz as the window gets narrower ("500 kHz", then "244 Hz"), so it is
+clear what a click did.
 
 Where the ladder stops is arithmetic rather than taste. The window is the
 receiver span divided by the zoom, the FFT divides that span into bins, so the

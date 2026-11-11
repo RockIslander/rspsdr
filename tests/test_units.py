@@ -32,7 +32,7 @@ from rspsdr.dsp import (  # noqa: E402
     design_lowpass, plan_chain, to_int16,
 )
 from rspsdr.memory import Channel, MemoryStore, adopt_previous, previous_path  # noqa: E402
-from rspsdr.radio import SPECTRUM_SEGMENTS, Settings  # noqa: E402
+from rspsdr.radio import SPECTRUM_SEGMENTS, Settings, device_label  # noqa: E402
 
 failures: list[str] = []
 
@@ -551,6 +551,28 @@ radio._error("probe failure")
 check("a device error reaches both the status and the callback",
       radio.status.error == "probe failure" and errors == ["probe failure"],
       f"status {radio.status.error!r}, callback {errors}")
+
+# An enumeration is every SoapySDR device, in driver order; the window opens
+# one of them, the one its arguments name.  On a machine with both a dongle and
+# an RSP1, the dongle can enumerate first, and the label used to name it.
+DEVS = [
+    {"label": "Generic RTL2832U OEM :: 00000001",
+     "driver": "rtlsdr", "serial": "00000001"},
+    {"label": "SDRplay Dev0 RSP1 0000000001",
+     "driver": "sdrplay", "serial": "0000000001"},
+]
+check("the device label names the radio the window will open, not the first found",
+      device_label(DEVS, "driver=sdrplay") == DEVS[1]["label"],
+      device_label(DEVS, "driver=sdrplay"))
+check("and another argument narrows it to the matching serial",
+      device_label(DEVS, "driver=rtlsdr,serial=00000001") == DEVS[0]["label"],
+      device_label(DEVS, "driver=rtlsdr,serial=00000001"))
+check("with nothing matching, the first device is the fallback",
+      device_label(DEVS, "driver=nosuchdriver") == DEVS[0]["label"],
+      device_label(DEVS, "driver=nosuchdriver"))
+check("and an empty enumeration says there is no SDR",
+      device_label([], "driver=sdrplay") == "no SDR found",
+      device_label([], "driver=sdrplay"))
 
 # ---------------------------------------------------------------- the meter
 # The signal meter's scale is the IARU recommendation and its dial is a printed

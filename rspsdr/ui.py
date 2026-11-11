@@ -74,13 +74,13 @@ from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout,
     QHeaderView, QInputDialog, QLabel, QLayout, QMainWindow, QMessageBox,
     QPushButton, QSizePolicy, QSlider, QSplitter, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget,
+    QTableWidgetItem, QToolButton, QVBoxLayout, QWidget,
 )
 
 from . import bands, ft8, logo, prefs, smeter, theme
 from .memory import Channel, MemoryStore
-from .radio import (TUNER_BANDWIDTHS, Radio, Settings, list_devices,
-                    transient_open_error)
+from .radio import (TUNER_BANDWIDTHS, Radio, Settings, device_label,
+                    list_devices, transient_open_error)
 
 MODES = [
     ("AM", "am", 6000.0), ("SAM", "sam", 6000.0), ("USB", "usb", 2400.0),
@@ -153,15 +153,13 @@ ZOOM_MAX = ZOOMS[-1][1]                 # the ladder's deepest step
 # arithmetic and tests/test_units.py checks the tie.
 FFTS = (1024, 2048, 4096, 8192, 16384, 32768, 65536)
 
-# Width of the left axis, forced to be the same on both plots.
+# Width of the spectrum's left axis -- the dB scale and room for its numbers.
 #
-# The spectrum labels its left axis in dB and the waterfall draws no values on
-# its, and left to itself that made the spectrum's plot area start ~57 px
-# further right.  Two plots with different scales do not line up: a carrier
-# drawn at one x in the spectrum sits at another x in the waterfall, and a
-# click lands tens of kHz from the frequency the screen appears to point at
-# (measured: 69 kHz at one edge of the span, 16 kHz at the other).  One shared
-# width keeps the frequency-to-pixel mapping identical in both.
+# The waterfall has no axis and no gutter: its picture runs to both edges of
+# its half of the window, which is 62 px of history the old hidden axis used to
+# hold.  The two plots therefore no longer share a plot area, and nothing needs
+# them to: each maps clicks and drags from its own view box (see _axis_px_map),
+# rather than assuming the other's geometry.
 PLOT_AXIS_WIDTH = 62
 
 # Waterfall history depth: one row per repaint, so this is how much of the
@@ -850,6 +848,9 @@ class WaterfallPlot(pg.PlotWidget):
     # picture out from under it, so the frequency under the cursor jumps by up
     # to half a window and a drag tunes in steps instead of tracking.
     settled = pyqtSignal(float)
+    # The side buttons: -1 pages the view left, +1 right.  The window decides
+    # what a page is, because it owns the receiver centre and the zoom.
+    panned = pyqtSignal(int)
 
     def __init__(self):
         super().__init__()
@@ -865,15 +866,44 @@ class WaterfallPlot(pg.PlotWidget):
         # the pixel-to-frequency mapping is sampled from the view box (see
         # _axis_px_map), not from the axis item.
         self.hideAxis("bottom")
-        self.getAxis("left").setStyle(showValues=False)
-        # Same width as the spectrum's, not merely hidden values: what matters
-        # is that both plot areas start and end at the same x.
-        self.getAxis("left").setWidth(PLOT_AXIS_WIDTH)
+        # ... and the left axis too.  The waterfall used to keep a hidden 62 px
+        # gutter there so its plot area lined up with the spectrum's; the
+        # picture is the point of the window, and it now runs from one edge of
+        # its half to the other.  The frequency scale above it is the only
+        # ruler either plot needs.
+        self.hideAxis("left")
+        self.setContentsMargins(0, 0, 0, 0)
         two_tick_levels(self)
         self.img = FastImage(axisOrder="row-major")
         self.addItem(self.img)
         self.invertY(True)          # newest line at the top
         self.band_markers = BandMarkers(self)
+
+        # Paging buttons, one on each edge, over the picture.  Dragging the
+        # view is fine at 4x and hopeless at 256x, where the window is 244 Hz
+        # wide and one pixel is a handful of hertz: these move it by a known
+        # half-window instead.  They are children of the plot rather than rows
+        # of a layout -- there is no room above or below this picture for
+        # another row, and none should be taken from it.
+        self.pan_left = QToolButton(self)
+        self.pan_left.setText("‹")
+        self.pan_left.setToolTip("Move the view left by half a window")
+        self.pan_left.clicked.connect(lambda: self.panned.emit(-1))
+        self.pan_right = QToolButton(self)
+        self.pan_right.setText("›")
+        self.pan_right.setToolTip("Move the view right by half a window")
+        self.pan_right.clicked.connect(lambda: self.panned.emit(1))
+        for button in (self.pan_left, self.pan_right):
+            button.setAutoRaise(False)
+            button.setAutoRepeat(True)
+            button.setAutoRepeatDelay(350)
+            button.setAutoRepeatInterval(120)
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setFixedSize(24, 52)
+            button.raise_()
+        self.set_pan_style(theme.palette(theme.DEFAULT))
+        self._place_pan_buttons()
 
         # Two copies of the same history.  `_wf` is the truth: the dB rows the
         # arithmetic is done on, and what a floor, contrast or colour change is
@@ -913,7 +943,7 @@ class WaterfallPlot(pg.PlotWidget):
         """Columns that map onto the plot's own pixels (SDR++'s dataWidth)."""
         px = int(round(self.plotItem.vb.width() * self.devicePixelRatioF()))
         if px <= 0:                     # nothing has been laid out yet
-            px = max(1, (self.width() or 0) - PLOT_AXIS_WIDTH)
+            px = max(1, self.width() or 0)
         return px
 
     def _screen_rows(self) -> int:
@@ -922,6 +952,36 @@ class WaterfallPlot(pg.PlotWidget):
         if px <= 0:
             return WF_ROWS
         return max(WF_MIN_ROWS, min(px, WF_MAX_ROWS))
+
+    def set_pan_style(self, pal: dict):
+        """Paint the paging buttons in the current scheme's colours.
+
+        They sit over the waterfall, so the fill is translucent: enough of the
+        picture has to show behind them to see it moving, and enough contrast
+        has to remain to read the chevron over any colour map.
+        """
+        panel, accent = theme.rgb(pal["panel"]), theme.rgb(pal["accent"])
+        style = (
+            f"QToolButton{{background:rgba({panel[0]},{panel[1]},{panel[2]},"
+            f"78%);color:{pal['text']};border:1px solid {pal['border']};"
+            f"border-radius:4px;font-size:20px;font-weight:bold;padding:0px}}"
+            f"QToolButton:hover{{background:rgba({accent[0]},{accent[1]},"
+            f"{accent[2]},92%);color:{pal['highlight_text']};"
+            f"border:1px solid {pal['accent']}}}"
+            f"QToolButton:pressed{{background:{pal['accent']};"
+            f"color:{pal['highlight_text']}}}")
+        for button in (self.pan_left, self.pan_right):
+            button.setStyleSheet(style)
+
+    def _place_pan_buttons(self):
+        """Keep the paging buttons on the edges, halfway down the picture."""
+        margin = 5
+        y = max(margin, (self.height() - self.pan_left.height()) // 2)
+        self.pan_left.move(margin, y)
+        self.pan_right.move(max(margin, self.width() - self.pan_right.width()
+                                - margin), y)
+        self.pan_left.raise_()
+        self.pan_right.raise_()
 
     def resizeEvent(self, ev):                 # noqa: N802
         """Re-fit the history: the picture is as big as the plot is.
@@ -937,8 +997,11 @@ class WaterfallPlot(pg.PlotWidget):
         # any state at all -- and PlotWidget's __getattr__ raises for a missing
         # attribute rather than answering with a default, so the flag is looked
         # up defensively.
+        # pyqtgraph calls this from its own constructor, before the paging
+        # buttons have been made; _laid_out is what says the object is whole.
         if getattr(self, "_laid_out", False):
             self._fit_to_plot(self._vis_bins)
+            self._place_pan_buttons()
 
     def _target_cols(self, bins: int) -> int:
         """How wide a row should be built from ``bins`` frequency points.
@@ -2612,6 +2675,7 @@ class MainWindow(QMainWindow):
         self.spectrum.settled.connect(self._tune_settled)
         self.waterfall.settled.connect(self._tune_settled)
         self.waterfall.zoom.connect(self._zoom_step)
+        self.waterfall.panned.connect(self._pan_view)
         self.spectrum.recentre.connect(self._recentre_to)
         self.spectrum.stepped.connect(self._step_tune)
         self.spectrum.cursor.connect(
@@ -2693,6 +2757,7 @@ class MainWindow(QMainWindow):
                 axis.setPen(pg.mkPen(p["grid"], width=1.0))
                 axis.setTextPen(pg.mkPen(p["muted"]))
             plot.band_markers.set_colours(p["muted"], p["plot"])
+        self.waterfall.set_pan_style(p)
         # The grid's colour follows the axis pen; this is only how strongly it
         # is drawn, and a light scheme needs more of it to be seen at all.
         self.spectrum.showGrid(x=True, y=True, alpha=float(p["grid_alpha"]))
@@ -2984,10 +3049,12 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------ actions
     def _device_label(self) -> str:
-        devs = list_devices()
-        if not devs:
-            return "no SDR found"
-        return devs[0]["label"]
+        """The receiver this window will open, as SoapySDR names it.
+
+        The enumeration is of every SoapySDR device, not just the one asked
+        for, so the matching is done by :func:`rspsdr.radio.device_label`.
+        """
+        return device_label(list_devices(), self.settings.device_args)
 
     def _refresh_devices(self):
         try:
@@ -3169,6 +3236,29 @@ class MainWindow(QMainWindow):
         centre = self.radio.settings.center_freq
         if abs(freq - centre) > 0.9 * half:
             self.spn_center.setValue(freq / 1e6)
+
+    def _pan_view(self, direction: int):
+        """Page the picture left or right, by half a window each press.
+
+        The window is the receiver span over the zoom, centred on the hardware,
+        so moving the view means moving the receiver's centre -- the dial stays
+        where it is, and a station that leaves the picture keeps playing.  The
+        side buttons exist because at the deep end of the ladder the window is
+        narrower than a filter and a drag has no distance left to move it.
+        """
+        if not direction:
+            return
+        half = 0.5 * float(self.settings.sample_rate) / max(1, self._zoom)
+        before = self.radio.settings.center_freq
+        target = min(max(before + direction * half, 10_000.0),
+                     2_000_000_000.0)
+        if target == before:
+            self._on_status_line("the view is at the end of the tuning range")
+            return
+        self.spn_center.setValue(target / 1e6)
+        self._on_status_line(
+            f"view {'right' if direction > 0 else 'left'} -- centre "
+            f"{target/1e6:.6f} MHz")
 
     def _recentre(self):
         self.spn_center.setValue(self.settings.tuned_freq / 1e6)

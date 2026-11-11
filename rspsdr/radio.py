@@ -180,6 +180,32 @@ def list_devices() -> list[dict]:
     return out
 
 
+def device_label(devs: list[dict], device_args: str) -> str:
+    """The name of the device these arguments select, from an enumeration.
+
+    An enumeration lists every SoapySDR device on the machine, in whatever
+    order the drivers come back in -- with an RTL-SDR and an RSP1 both
+    attached, the dongle can be first.  The window, however, opens exactly one
+    device, the one ``device_args`` names (``driver=sdrplay`` by default), so
+    labelling it with ``devs[0]`` named the wrong radio.  Match the arguments
+    against each device's own keys and use that device's label; if nothing
+    matches -- an RSP1 that was replugged between the enumeration and the open
+    -- fall back to the first, which is what the old code did.
+    """
+    if not devs:
+        return "no SDR found"
+    wanted = {}
+    for part in (device_args or "").split(","):
+        key, sep, value = part.partition("=")
+        if sep and key.strip() and value.strip():
+            wanted[key.strip()] = value.strip()
+    for dev in devs:
+        if wanted and all(str(dev.get(key, "")) == value
+                          for key, value in wanted.items()):
+            return dev["label"]
+    return devs[0]["label"]
+
+
 class Radio:
     """Owns the SDR device and the two worker threads.
 

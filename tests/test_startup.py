@@ -484,9 +484,10 @@ check("when the device frees up it starts streaming, unattended",
 # machine can hold the RSP1 for a moment, and then the list really is empty.)
 found = list_devices()
 check("... and the device label is refreshed from the device list",
-      win.lbl_device.text() == (found[0]["label"] if found else "no SDR found"),
-      f"“{win.lbl_device.text()}” for "
-      f"{found[0]['label'] if found else 'nothing enumerated'}")
+      win.lbl_device.text()
+      == radio_mod.device_label(found, win.settings.device_args),
+      f"“{win.lbl_device.text()}” for “{win.settings.device_args}” "
+      f"among {len(found)} device(s)")
 check("... and the status bar stops saying it is still trying",
       "trying again" not in win.lbl_status.text(), win.lbl_status.text())
 

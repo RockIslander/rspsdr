@@ -771,31 +771,28 @@ def main() -> int:
               win._zoom == 1 and win.lbl_zoom.text() == f"{span/1e6:g} MHz",
               f"zoom {win._zoom}x, readout “{win.lbl_zoom.text()}”")
 
-        # ---- the two plots must share one frequency axis ---------------
-        # They are separate widgets and the spectrum labels its left axis in dB
-        # while the waterfall draws no values on its, so their plot areas used
-        # to start 57 px apart.  Then a carrier sat at a different x in the two
-        # pictures and a click landed tens of kHz from the frequency the screen
-        # appeared to point at.
+        # ---- the waterfall runs edge to edge ---------------------------
+        # It has no scale of its own and now no gutter either: the picture
+        # starts at the plot's own left edge and ends at its right.  The
+        # spectrum keeps its dB scale, so the two no longer share a plot area;
+        # each maps clicks and drags from its own view box, which is what the
+        # tuning below exercises.
         areas = {}
         for name, plot in (("spectrum", win.spectrum),
                            ("waterfall", win.waterfall)):
             r = plot.plotItem.vb.sceneBoundingRect()
             areas[name] = (r.x(), r.x() + r.width())
-        check("the spectrum and waterfall share the same plot area",
-              abs(areas["spectrum"][0] - areas["waterfall"][0]) < 1.0
-              and abs(areas["spectrum"][1] - areas["waterfall"][1]) < 1.0,
-              f"spectrum {areas['spectrum'][0]:.1f}..{areas['spectrum'][1]:.1f} px, "
-              f"waterfall {areas['waterfall'][0]:.1f}..{areas['waterfall'][1]:.1f} px")
-
-        worst = 0.0
-        for x in (200, 700, 1200):
-            here = [plot.plotItem.vb.mapSceneToView(
-                QPointF(float(x), plot.height() / 2)).x()
-                for plot in (win.spectrum, win.waterfall)]
-            worst = max(worst, abs(here[1] - here[0]) * 1e6)
-        check("a pixel means the same frequency in both plots", worst < 500.0,
-              f"worst disagreement {worst:.0f} Hz across the span")
+        check("the waterfall picture reaches both sides of the plot",
+              areas["waterfall"][0] < 2.0
+              and areas["waterfall"][1] - areas["waterfall"][0]
+              >= win.waterfall.width() - 4.0,
+              f"waterfall {areas['waterfall'][0]:.1f}.."
+              f"{areas['waterfall'][1]:.1f} px in a "
+              f"{win.waterfall.width()} px widget")
+        check("and the spectrum keeps its dB scale beside it",
+              areas["spectrum"][0] >= 30.0,
+              f"spectrum {areas['spectrum'][0]:.1f}.."
+              f"{areas['spectrum'][1]:.1f} px")
 
         # A real click on the waterfall must land where the screen says it will.
         was_tuned = win.settings.tuned_freq
@@ -815,6 +812,37 @@ def main() -> int:
               f"{(clicks[0] if clicks else float('nan'))/1e6:.6f} MHz, "
               f"axis says {want/1e6:.6f} MHz")
         win.spn_freq.setValue(was_tuned / 1e6)      # leave the state as it was
+
+        # ---- the side buttons page the view ---------------------------
+        left, right = win.waterfall.pan_left, win.waterfall.pan_right
+        check("the waterfall has a paging button on each side",
+              left.isVisible() and right.isVisible()
+              and left.x() < 10
+              and right.x() + right.width() > win.waterfall.width() - 10
+              and abs(left.geometry().center().y()
+                      - win.waterfall.height() / 2) < 3,
+              f"left {left.geometry().getRect()} right "
+              f"{right.geometry().getRect()} in "
+              f"{win.waterfall.width()}x{win.waterfall.height()}")
+        centre_before = win.radio.settings.center_freq
+        tuned_before = win.settings.tuned_freq
+        right.click()
+        app.processEvents()
+        check("the right-hand button pages the view right by half a window",
+              abs(win.radio.settings.center_freq
+                  - (centre_before + span / 2.0)) < 1.0,
+              f"centre {centre_before/1e6:.6f} -> "
+              f"{win.radio.settings.center_freq/1e6:.6f} MHz, wanted "
+              f"{(centre_before + span/2)/1e6:.6f}")
+        check("... without retuning the dial",
+              win.settings.tuned_freq == tuned_before,
+              f"tuned {tuned_before/1e6:.6f} -> "
+              f"{win.settings.tuned_freq/1e6:.6f} MHz")
+        left.click()
+        app.processEvents()
+        check("and the left-hand button pages it back",
+              abs(win.radio.settings.center_freq - centre_before) < 1.0,
+              f"centre back to {win.radio.settings.center_freq/1e6:.6f} MHz")
 
         win.cmb_zoom.setCurrentIndex(2)                 # 4x
         lo4, hi4 = win._view(centre, span)
