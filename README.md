@@ -1,9 +1,9 @@
 # RSPSDR
 
 A small desktop receiver for the **SDRplay RSP1** on Linux, built for listening
-to the HF amateur bands and the shortwave broadcast bands. The window opens on
-its own name and mark, and the same artwork ships as `rspsdr.svg` for the menu
-entry and the task bar.
+to the HF amateur bands, the shortwave broadcast bands and the VHF airband. The
+window opens on its own name and mark, and the same artwork ships as
+`rspsdr.svg` for the menu entry and the task bar.
 
 Live spectrum, a waterfall, and full tuning / gain / demodulation controls:
 **AM, synchronous AM, USB, LSB, CW and narrow FM**, with switchable **noise
@@ -121,8 +121,8 @@ The radio starts automatically when the window opens.
 | Mouse wheel over the waterfall | zoom the picture in / out |
 | `‹` `›` over the waterfall | page the view left / right by half a window |
 | `◀` `▶` buttons, or the dial box itself | step / type a frequency |
-| **Jump to band…** | 160 m … 6 m, and every shortwave metre band |
-| **Presets…** | WWV/CHU time signals, FT8 & WSPR calling frequencies, broadcasts |
+| **Jump to band…** | 160 m … 6 m, every shortwave metre band, and the airband |
+| **Presets…** | WWV/CHU time, FT8 & WSPR calling frequencies, broadcasts, airband |
 | **Centre** box, in Settings | move the received window without changing where you listen |
 
 Clicking or tuning near the edge of the window re-centres the receiver
@@ -139,9 +139,9 @@ frequency from the scale the picture is drawn against, so it lands on the
 frequency the labels show.
 
 **Band markers** — the band plan is drawn where you tune it: a dashed rule at
-each amateur and shortwave band edge on both the spectrum and the waterfall,
-and the band's name along the top of each, so a carrier is where it is *and*
-inside 40 m. The markers follow the zoom and are only drawn for bands in view;
+each amateur, shortwave and airband band edge on both the spectrum and the
+waterfall, and the band's name along the top of each, so a carrier is where it
+is *and* inside 40 m. The markers follow the zoom and are only drawn for bands in view;
 a band too narrow on screen to name is left as its two edges rather than given
 a label that would sit over the band next door. **Band markers** in the
 settings pane turns them off, and is remembered.
@@ -154,6 +154,18 @@ demodulator is really using: either side of the dial for AM/SAM/NFM, the side
 *above* the dial for USB, *below* it for LSB, and on the dial plus the pitch for
 CW. So the picture tells you the mode — it no longer looks like AM whichever one
 you pick.
+
+**Airband** — the civil aviation VHF band is in the plan too: 108–118 MHz is the
+navigation block (VOR and ILS carriers, AM with a subcarrier on them) and
+118–137 MHz is voice — tower, ground, approach, ATIS and VOLMET — all of it AM
+on channels 25 kHz apart (8.33 kHz where Europe has gone narrow), so the
+**25 kHz** step and the 6 kHz AM filter are what to tune it with. The band
+markers name both blocks, **Jump to band…** lands in the middle of each, and
+**Presets…** jumps to Air guard (121.500, the emergency channel and the one to
+check an antenna against), UNICOM and air-to-air — airport frequencies differ
+from field to field, so the presets are the three that mean the same thing
+anywhere. It needs a VHF antenna: an HF wire hears very little at 120 MHz, and
+a discone or a whip outside the window does better.
 
 **Gain** — `RF AGC` lets the radio set its own level. With it off, **IF gain**
 (20–59 dB) is the main control; use the least gain that still lifts the noise
@@ -883,7 +895,11 @@ the designed response to a machine that is too busy; the receiver stays in the
 present rather than drifting behind.
 
 **Nothing above 30 MHz sounds right** — the RSP1 covers up to 2 GHz and the
-tuning accepts any frequency, but the presets and band data are aimed at HF.
+tuning accepts any frequency, but the band plan and presets stop at the top of
+the airband, 137 MHz. Above that the window will not tell you what you have
+found (the 2 m and 70 cm ham bands, weather satellites, the usual utility
+traffic): tune by frequency and listen. Gain matters more up there than on HF —
+raise the IF gain until the noise floor lifts off the bottom of the waterfall.
 
 ## Notes and limitations
 

@@ -431,6 +431,15 @@ def main() -> int:
               and abs(win.settings.tuned_freq - 14_175_000) < 500_000,
               f"{win.settings.tuned_freq/1e6:.6f} MHz, mode {win.radio.demod.mode}")
 
+        # ... and the airband, which is the only band above 6 m in the list.
+        idx = next(i for i in range(win.cmb_band.count())
+                   if getattr(win.cmb_band.itemData(i), "name", None) == "Air band")
+        win.cmb_band.setCurrentIndex(idx)
+        check("the airband is in the band list, and jumps to its middle in AM",
+              abs(win.settings.tuned_freq - 127_500_000) < 1.0
+              and win.settings.mode == "am",
+              f"{win.settings.tuned_freq/1e6:.6f} MHz, mode {win.settings.mode}")
+
         win.spn_center.setValue(14_200_000 / 1e6)
         check("centre control retunes the hardware",
               abs(win.radio.settings.center_freq - 14_200_000) < 1.0,

@@ -1,4 +1,4 @@
-"""Band plan and tuning presets for HF / shortwave listening.
+"""Band plan and tuning presets for HF, shortwave and the VHF airband.
 
 Ham segments follow the IARU Region 2 plan (the Americas), which is what is
 relevant for a receiver in North America.  Shortwave broadcast bands are the
@@ -55,6 +55,18 @@ SW_BANDS: list[Band] = [
     Band("11m", 25_670_000, 26_100_000, "am"),
 ]
 
+# --- civil aviation VHF: the airband -----------------------------------
+# 108-118 MHz is the navigation block, VOR and ILS localiser carriers, and
+# 118-137 MHz is voice: tower, ground, approach, ATIS and VOLMET.  Both are
+# AM, on 25 kHz channels (8.33 kHz in Europe).
+AIR_BANDS: list[Band] = [
+    Band("Air nav", 108_000_000, 118_000_000, "am", "VOR/ILS"),
+    Band("Air band", 118_000_000, 137_000_000, "am", "voice"),
+]
+
+# Everything the two lookups below search, in one place.
+ALL_BANDS: list[Band] = HAM_BANDS + SW_BANDS + AIR_BANDS
+
 # --- quick-jump "stations worth finding" -------------------------------
 @dataclass(frozen=True)
 class Preset:
@@ -96,6 +108,12 @@ PRESETS: list[Preset] = [
     # Utility / marine
     Preset("Volmet 5", 5_598_000, "usb", "HF VOLMET USB"),
     Preset("HFDL", 10_081_000, "usb", "aircraft HFDL"),
+    # Airband -- civil aviation, AM, on 25 kHz channels.  Airport frequencies
+    # differ from field to field, so these are the channels that mean the same
+    # thing wherever you are; 121.500 is the one to check an antenna against.
+    Preset("Air guard", 121_500_000, "am", "121.5 emergency"),
+    Preset("Air UNICOM", 122_800_000, "am", "UNICOM"),
+    Preset("Air air-to-air", 123_450_000, "am", "air-to-air"),
 ]
 
 
@@ -109,16 +127,13 @@ def bands_in_view(lo: float, hi: float) -> list[Band]:
     wider band comes first, so the narrower one is the label that is dropped
     when the two would collide.
     """
-    found = [b for b in HAM_BANDS + SW_BANDS if b.low <= hi and b.high >= lo]
+    found = [b for b in ALL_BANDS if b.low <= hi and b.high >= lo]
     found.sort(key=lambda b: (b.low, -(b.high - b.low)))
     return found
 
 
 def find_band(freq: float) -> Band | None:
-    for b in HAM_BANDS:
-        if b.low <= freq <= b.high:
-            return b
-    for b in SW_BANDS:
+    for b in ALL_BANDS:
         if b.low <= freq <= b.high:
             return b
     return None

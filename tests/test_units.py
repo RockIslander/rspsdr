@@ -993,6 +993,25 @@ check("a band that ends exactly at the edge of the window is still marked",
       ", ".join(b.name for b in bands.bands_in_view(7_300_000, 7_300_000)))
 check("a band's centre is its midpoint",
       bands.find_band(3_700_000).centre == 3_750_000.0)
+check("an airband frequency is found, and a window there marks it",
+      bands.find_band(121_500_000).name == "Air band"
+      and bands.find_band(110_000_000).name == "Air nav"
+      and [b.name for b in bands.bands_in_view(120_000_000, 122_000_000)]
+      == ["Air band"],
+      f"{bands.find_band(121_500_000).name}, "
+      f"{bands.find_band(110_000_000).name}, "
+      f"{[b.name for b in bands.bands_in_view(120_000_000, 122_000_000)]}")
+check("the airband is two AM blocks, 108-118 and 118-137",
+      [(b.low, b.high, b.mode) for b in bands.AIR_BANDS]
+      == [(108_000_000, 118_000_000, "am"), (118_000_000, 137_000_000, "am")],
+      repr([(b.name, b.low, b.high) for b in bands.AIR_BANDS]))
+air_presets = [p for p in bands.PRESETS if p.name.startswith("Air ")]
+check("airband presets are 25 kHz channels inside the airband, in AM",
+      len(air_presets) >= 3
+      and all(p.mode == "am" and p.freq % 25_000 == 0
+              and getattr(bands.find_band(p.freq), "name", "").startswith("Air ")
+              for p in air_presets),
+      ", ".join(f"{p.name} {p.freq/1e6:.3f}" for p in air_presets))
 check("ham and shortwave bands are ordered and non-overlapping",
       all(a.low < a.high for a in bands.HAM_BANDS + bands.SW_BANDS))
 check("every preset names a mode the demodulator has",
