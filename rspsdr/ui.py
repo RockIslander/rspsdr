@@ -93,8 +93,12 @@ MODES = [
 ]
 MODE_BW = {m[1]: m[2] for m in MODES}
 
+# The 8.33 kHz entry is not stepped by its 8333 Hz, which is only how the list
+# remembers it: the European airband's narrow channels are on a 25000/3 Hz grid
+# and are stepped along that, or the dial drifts.  See next_narrow_channel().
 STEPS = [("1 Hz", 1), ("10 Hz", 10), ("100 Hz", 100), ("1 kHz", 1000),
-         ("2.5 kHz", 2500), ("5 kHz", 5000), ("9 kHz", 9000),
+         ("2.5 kHz", 2500), ("5 kHz", 5000),
+         ("8.33 kHz", bands.NARROW_STEP_HZ), ("9 kHz", 9000),
          ("10 kHz", 10000), ("12.5 kHz", 12500), ("25 kHz", 25000),
          ("100 kHz", 100000)]
 
@@ -1756,6 +1760,29 @@ class SettingsPane(QWidget):
             "every control below the picture; hide them for a taller waterfall")
 
 
+class StepSpinBox(QDoubleSpinBox):
+    """The dial's box, with the 8.33 kHz step taken on the airband's grid.
+
+    The box shows six decimals of a megahertz, so it holds whole hertz and
+    nothing finer.  A rounded 8333 Hz added to 118.016666 leaves 118.024999 --
+    a hertz low, and the readings march away from the channel three presses at
+    a time.  On that step the arrow keys ask bands.next_narrow_channel() where
+    to go rather than adding anything, and the window leaves this box's own
+    single step at nothing so that nothing else adds behind its back.
+    """
+
+    narrow = False
+
+    def stepBy(self, steps: int) -> None:
+        if not self.narrow:
+            super().stepBy(steps)
+            return
+        here = self.value() * 1e6
+        for _ in range(abs(steps)):
+            here = bands.next_narrow_channel(here, 1 if steps > 0 else -1)
+        self.setValue(max(here, 10_000.0) / 1e6)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, settings: Settings | None = None,
                  memory_path: str | None = None,
@@ -1803,6 +1830,7 @@ class MainWindow(QMainWindow):
         self._closing = False
         self._latest: tuple | None = None
         self._step = 1000
+        self._narrow = False      # is that step the 8.33 kHz airband grid?
         self._zoom = 1
         self._building = True
         self._ui_running = False       # mirrors what the Start button shows
@@ -2234,7 +2262,7 @@ class MainWindow(QMainWindow):
         self.btn_start.setStyleSheet(self._start_button_style(False))
         lay.addWidget(self.btn_start)
 
-        self.spn_freq = QDoubleSpinBox()
+        self.spn_freq = StepSpinBox()
         self.spn_freq.setDecimals(6)
         self.spn_freq.setRange(0.01, 2000.0)
         self.spn_freq.setSuffix(" MHz")
@@ -3269,7 +3297,9 @@ class MainWindow(QMainWindow):
 
     def _step_changed(self):
         self._step = int(self.cmb_step.currentData())
-        self.spn_freq.setSingleStep(self._step / 1e6)
+        self._narrow = self._step == bands.NARROW_STEP_HZ
+        self.spn_freq.narrow = self._narrow
+        self.spn_freq.setSingleStep(0.0 if self._narrow else self._step / 1e6)
         self._remember_soon()
 
     def _tune(self, freq: float):
@@ -3347,7 +3377,11 @@ class MainWindow(QMainWindow):
         self.spn_center.setValue(freq / 1e6)
 
     def _step_tune(self, direction: int):
-        f = self.settings.tuned_freq + direction * self._step
+        """One step up or down -- the airband grid if that step is set."""
+        if self._narrow:
+            f = bands.next_narrow_channel(self.settings.tuned_freq, direction)
+        else:
+            f = self.settings.tuned_freq + direction * self._step
         self.spn_freq.setValue(max(f, 10000.0) / 1e6)
 
     def _band_selected(self, idx: int):

@@ -35,7 +35,7 @@ from PyQt6.QtGui import QImage, QMouseEvent, QWheelEvent  # noqa: E402
 from PyQt6.QtWidgets import (QApplication, QHBoxLayout, QLabel,  # noqa: E402
                              QSplitter)
 
-from rspsdr import logo, ui  # noqa: E402
+from rspsdr import bands, logo, ui  # noqa: E402
 from rspsdr.memory import MemoryStore  # noqa: E402
 from rspsdr.radio import Settings  # noqa: E402
 from rspsdr.ui import MainWindow  # noqa: E402
@@ -1637,6 +1637,31 @@ def main() -> int:
         check("and steps it back down",
               abs(win.settings.tuned_freq - before) < 1.0,
               f"{win.settings.tuned_freq/1e6:.6f} MHz vs {before/1e6:.6f} MHz")
+
+        # ---- the 8.33 kHz airband step ---------------------------------
+        win.spn_freq.setValue(121_500_000 / 1e6)
+        narrow = win.cmb_step.findData(bands.NARROW_STEP_HZ)
+        win.cmb_step.setCurrentIndex(narrow)
+        check("the 8.33 kHz step is in the list and reaches the dial",
+              narrow > 0 and win._narrow and win.spn_freq.narrow
+              and win.spn_freq.singleStep() == 0.0,
+              f"index {narrow}, step {win._step} Hz, dial single step "
+              f"{win.spn_freq.singleStep()}")
+        for _ in range(3):
+            win.btn_step_up.click()
+        climbed = win.settings.tuned_freq
+        for _ in range(3):
+            win.btn_step_down.click()
+        check("three 8.33 kHz steps make a 25 kHz channel exactly",
+              abs(climbed - 121_525_000) < 1e-3
+              and abs(win.settings.tuned_freq - 121_500_000) < 1e-3,
+              f"{climbed/1e6:.6f} MHz up, "
+              f"{win.settings.tuned_freq/1e6:.6f} MHz back")
+        win.spn_freq.stepBy(1)
+        check("and the dial's own arrow key stays on that grid",
+              abs(win.settings.tuned_freq - 121_508_333) < 1e-3,
+              f"{win.settings.tuned_freq/1e6:.6f} MHz")
+        win.cmb_step.setCurrentIndex(5)                # back to 5 kHz
 
         # ---- click and drag on the spectrum ----------------------------
         clicks = []

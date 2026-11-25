@@ -67,6 +67,20 @@ AIR_BANDS: list[Band] = [
 # Everything the two lookups below search, in one place.
 ALL_BANDS: list[Band] = HAM_BANDS + SW_BANDS + AIR_BANDS
 
+# The 8.33 kHz channels of the European airband are each 25 kHz channel cut in
+# three, so they sit 25000/3 Hz apart: 118.000, 118.008333, 118.016667,
+# 118.025 ...  Only every third one is a whole number of hertz, so a step is
+# taken from that grid and rounded once at the end: a rounded 8333 Hz added
+# three times lands a hertz low, on 118.024999.
+NARROW_STEP_HZ = 8_333          # the step, as the window remembers it
+AIRBAND_NARROW_HZ = 25_000 / 3
+
+
+def next_narrow_channel(freq: float, direction: int) -> int:
+    """The next 8.33 kHz channel up or down from ``freq``, in whole hertz."""
+    k = round(freq / AIRBAND_NARROW_HZ) + direction
+    return round(k * AIRBAND_NARROW_HZ)
+
 # --- quick-jump "stations worth finding" -------------------------------
 @dataclass(frozen=True)
 class Preset:

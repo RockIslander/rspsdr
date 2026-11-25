@@ -158,8 +158,11 @@ you pick.
 **Airband** — the civil aviation VHF band is in the plan too: 108–118 MHz is the
 navigation block (VOR and ILS carriers, AM with a subcarrier on them) and
 118–137 MHz is voice — tower, ground, approach, ATIS and VOLMET — all of it AM
-on channels 25 kHz apart (8.33 kHz where Europe has gone narrow), so the
-**25 kHz** step and the 6 kHz AM filter are what to tune it with. The band
+on channels 25 kHz apart. Europe's 8.33 kHz channels cut each of those in three
+(118.008333, 118.016667, 118.025 …), and the **8.33 kHz** step in the list takes
+them on that grid, rounding once at the end — a rounded 8333 Hz added three
+times would leave the dial at 118.024999. That step or **25 kHz**, with the
+6 kHz AM filter, is what to tune the band with. The band
 markers name both blocks, **Jump to band…** lands in the middle of each, and
 **Presets…** jumps to Air guard (121.500, the emergency channel and the one to
 check an antenna against), UNICOM and air-to-air — airport frequencies differ

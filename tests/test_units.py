@@ -1012,6 +1012,20 @@ check("airband presets are 25 kHz channels inside the airband, in AM",
               and getattr(bands.find_band(p.freq), "name", "").startswith("Air ")
               for p in air_presets),
       ", ".join(f"{p.name} {p.freq/1e6:.3f}" for p in air_presets))
+check("three 8.33 kHz steps climb a 25 kHz channel exactly",
+      [bands.next_narrow_channel(f, 1)
+       for f in (118_000_000, 118_008_333, 118_016_667)]
+      == [118_008_333, 118_016_667, 118_025_000],
+      ", ".join(str(bands.next_narrow_channel(f, 1))
+                for f in (118_000_000, 118_008_333, 118_016_667)))
+check("an 8.33 kHz step comes back to where it started",
+      all(bands.next_narrow_channel(bands.next_narrow_channel(f, 1), -1) == f
+          for f in (118_000_000, 121_508_333, 122_800_000)))
+walked = 118_000_000
+for _ in range(1200):
+    walked = bands.next_narrow_channel(walked, 1)
+check("twelve hundred 8.33 kHz steps are still on the 25 kHz grid",
+      walked == 128_000_000, f"{walked} Hz after 1200 steps")
 check("ham and shortwave bands are ordered and non-overlapping",
       all(a.low < a.high for a in bands.HAM_BANDS + bands.SW_BANDS))
 check("every preset names a mode the demodulator has",
