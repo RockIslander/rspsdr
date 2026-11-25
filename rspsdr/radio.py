@@ -6,8 +6,12 @@ Threading model
             (retune, gain) so no other thread ever touches the handle, and
             pushes blocks of complex samples into a bounded deque.
 ``dsp``     pops those blocks, runs the DDC + demodulator one frame at a time
-            and hands audio to the :class:`AudioOutput`.  It also computes the
-            spectrum that drives the GUI.
+            and hands audio to the :class:`AudioOutput`.  It queues the IQ for
+            the spectrum and never waits for it.
+``spectrum`` runs the FFT that drives the GUI on its own thread.  At 8 MSps a
+            65536-point transform can take longer than one frame, and the RF
+            and audio path must not be held up by the picture; a frame that
+            arrives while the worker is still busy is skipped, not queued.
 
 The deque is deliberately bounded: if the DSP cannot keep up we drop the
 oldest RF instead of accumulating latency forever.
@@ -18,6 +22,7 @@ from __future__ import annotations
 import collections
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 
 import numpy as np
@@ -57,6 +62,13 @@ TUNER_BANDWIDTHS = [200_000, 300_000, 600_000, 1_536_000,
 # absorbs short bursts of contention without dropping anything at all.
 READ_BLOCK = 32768
 BACKLOG_SECONDS = 0.8
+# The queue is capped by memory as well as by time.  A fixed 48-block cap meant
+# 0.8 s at 2 MSps but only 0.2 s at 8 MSps, where a 65536-point FFT can pause
+# the DSP thread for longer than that -- and the reader then threw samples away
+# on a stream that was keeping up on average.  At 128 blocks the queue is at
+# most 32 MB of complex64 at any rate: 0.8 s at 2 MSps (the 49 blocks the time
+# cap already asks for), 0.5 s at 8 MSps, and 0.4 s at 10 MSps.
+BACKLOG_BLOCKS_MAX = 128
 
 # How many FFT segments of the current hop may be transformed per frame.  This
 # is the ceiling on what the spectrum costs, and it has to be a ceiling rather
@@ -115,6 +127,19 @@ class Settings:
             if bw <= self.sample_rate:
                 best = bw
         return int(best)
+
+    def effective_spec_avg(self) -> float:
+        """Temporal smoothing the spectrum actually uses at this rate.
+
+        At 8 MSps a 65536-point FFT gets two Welch segments a frame, so each
+        estimate is noisier than the sixteen-segment one at 2–6 MSps.  A floor
+        of 0.80 on the time average makes the waterfall readable there without
+        adding FFT work; a stored value above it still wins, and at lower rates
+        the stored value is used unchanged.
+        """
+        if self.sample_rate >= 7_000_000 and self.n_fft >= 32768:
+            return max(self.spec_avg, 0.80)
+        return self.spec_avg
 
 
 @dataclass
@@ -250,12 +275,17 @@ class Radio:
         self._last_data = 0.0            # when the newest sample arrived
         self._last_error_report = 0.0
 
-        self.spectrum = Spectrum(self.settings.n_fft, self.settings.spec_avg)
+        self.spectrum = Spectrum(self.settings.n_fft,
+                                 self.settings.effective_spec_avg())
         self.ddc: Downconverter | None = None
         self.demod: Demodulator | None = None
         self.audio: AudioOutput | None = None
         self._pending: np.ndarray | None = None
         self._spec_buf = np.empty(0, dtype=np.complex64)
+        self._spec_executor: ThreadPoolExecutor | None = None
+        self._spec_future = None
+        self._spec_load = 0.0
+        self._spec_last = 0.0          # wall time the worker last started
         self._squelch_reported = None
 
     # ---------------------------------------------------------- device
@@ -324,12 +354,22 @@ class Radio:
                 break
 
         depth = int(BACKLOG_SECONDS * s.sample_rate / READ_BLOCK) + 1
-        self._chunks = collections.deque(maxlen=max(8, min(48, depth)))
+        self._chunks = collections.deque(
+            maxlen=max(8, min(BACKLOG_BLOCKS_MAX, depth)))
         self._chunk_bytes = READ_BLOCK * 8
 
         self._build_dsp()
         self.audio = AudioOutput(AUDIO_RATE, backend=s.audio_backend)
         self.audio.start()
+
+        # One worker, and a frame is submitted only when it is free: the
+        # spectrum is allowed to lag the radio, but never to delay it.  Created
+        # per open so that a Start/Stop cycle gets a fresh thread.
+        self._spec_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="sdr-spectrum")
+        self._spec_future = None
+        self._spec_load = 0.0
+        self._spec_last = time.monotonic()
 
         self._running = True
         self.status = Status(
@@ -360,6 +400,10 @@ class Radio:
     def close(self):
         self._running = False
         self._last_data = 0.0
+        executor, self._spec_executor = self._spec_executor, None
+        self._spec_future = None
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
         for t in (self._reader, self._dsp):
             if t is not None:
                 t.join(timeout=2.0)
@@ -399,7 +443,7 @@ class Radio:
         self.demod = Demodulator(ft8.receiver_mode(s.mode), s.filter_bw, s.cw_pitch,
                                  agc=s.audio_agc, squelch_db=s.squelch_db,
                                  nr=s.nr, nr_level=s.nr_level / 100.0)
-        self.spectrum = Spectrum(s.n_fft, s.spec_avg)
+        self.spectrum = Spectrum(s.n_fft, s.effective_spec_avg())
         self._pending = np.zeros(0, dtype=np.complex64)
         self._spec_buf = np.empty(0, dtype=np.complex64)
 
@@ -414,9 +458,10 @@ class Radio:
                 self.close()
                 self.open()
             return
+        effective_avg = s.effective_spec_avg()
         if s.n_fft != getattr(self.spectrum, "n_fft", None) or \
-                abs(s.spec_avg - getattr(self.spectrum, "avg", -1)) > 1e-9:
-            self.spectrum = Spectrum(s.n_fft, s.spec_avg)
+                abs(effective_avg - getattr(self.spectrum, "avg", -1)) > 1e-9:
+            self.spectrum = Spectrum(s.n_fft, effective_avg)
         if self.demod is not None:
             self.demod.configure(ft8.receiver_mode(s.mode), s.filter_bw, s.cw_pitch)
             self.demod.agc.enabled = s.audio_agc
@@ -522,7 +567,10 @@ class Radio:
                 load = 0.9 * load + 0.1 * (time.thread_time() - t0) / frame_seconds
                 processed = True
             if processed:
-                self.status.cpu_load = load
+                # The spectrum runs on its own thread now; add its share so the
+                # status line still reports the whole DSP cost, not just the
+                # demodulator's half of it.
+                self.status.cpu_load = load + self._spec_load
                 self.status.lag = max(self._pending.size / rate, 0.0)
                 now = time.monotonic()
                 if now - self._last_status > 0.4:
@@ -555,15 +603,88 @@ class Radio:
         if nseg < 1:
             self._spec_buf = buf
             return None
-        if nseg > SPECTRUM_SEGMENTS:
+        cap = self._spectrum_segment_cap()
+        if nseg > cap:
             # More IQ than we are willing to transform in one go -- keep the
             # newest and throw the rest away rather than fall behind.  Dropping
             # old RF is the same bargain the reader thread makes.
-            start = (nseg - SPECTRUM_SEGMENTS) * n_fft
-            self._spec_buf = buf[start + SPECTRUM_SEGMENTS * n_fft:]
+            start = (nseg - cap) * n_fft
+            self._spec_buf = buf[start + cap * n_fft:]
             return buf[start:]
         self._spec_buf = buf[nseg * n_fft:]
         return buf[:nseg * n_fft]
+
+    def _spectrum_segment_cap(self) -> int:
+        """How many FFT segments one frame may average at this size.
+
+        The transform is the one part of the DSP whose cost is set by the FFT
+        size rather than by the audio rate, and at 65536 points sixteen
+        segments cost 30 ms -- longer than the 40 ms frame -- so at 8 MSps the
+        DSP was permanently behind and dropped RF even though the machine was
+        half idle.  Two segments at 65536, four at 32768 and eight at 16384
+        keep the per-frame work under the frame time; at 2-6 MSps the hop does
+        not offer more than that at 65536 anyway, so the full averaging is
+        kept exactly where it is affordable.
+        """
+        n_fft = int(self.settings.n_fft)
+        rate = float(self.settings.sample_rate)
+        # Below 7 MSps the hop itself does not offer more than three 65536-point
+        # segments a frame, so there is nothing to cap and the full averaging is
+        # kept.  At and above it the cap is what keeps the worker fed and the
+        # RF queue empty; 8 MSps measured clean at two, while three could still
+        # skip frames when the machine was busy.
+        if n_fft >= 65536 and rate >= 7_000_000:
+            return 2
+        if n_fft >= 32768 and rate >= 7_000_000:
+            return 4
+        if n_fft >= 16384 and rate >= 8_000_000:
+            return 8
+        return SPECTRUM_SEGMENTS
+
+    def _submit_spectrum(self, seg: np.ndarray, center: float, rate: float):
+        """Hand one frame to the spectrum worker, or run it inline.
+
+        The inline path is what an unopened Radio uses (``test_chain`` drives
+        ``_process_frame`` directly); a streaming radio always has an executor
+        and never waits for the FFT.
+        """
+        executor = self._spec_executor
+        if executor is None:
+            db = self.spectrum(seg)
+            if db is not None and self.on_spectrum is not None:
+                self.on_spectrum(center, db, rate)
+            return
+        future = self._spec_future
+        if future is not None and not future.done():
+            # The picture is behind by a frame.  Skipping it is better than
+            # queueing IQ the user has already seen and delaying the next one.
+            return
+        try:
+            self._spec_future = executor.submit(
+                self._spectrum_work, self.spectrum, seg, center, rate)
+        except RuntimeError:                        # closing race
+            self._spec_future = None
+
+    def _spectrum_work(self, spectrum, seg: np.ndarray, center: float,
+                       rate: float):
+        """One frame's FFT, on the spectrum thread."""
+        wall_started = time.monotonic()
+        started = time.thread_time()
+        try:
+            db = spectrum(seg)
+            if db is not None and self.on_spectrum is not None and self._running:
+                self.on_spectrum(center, db, rate)
+        except Exception as exc:                    # pragma: no cover
+            self._error(f"spectrum: {exc}")
+        finally:
+            # Duty cycle against wall time, not against the duration of the IQ
+            # in this one segment: when frames are skipped the worker is idle
+            # and its share of the CPU is lower, not higher.
+            gap = wall_started - self._spec_last if self._spec_last else 0.0
+            self._spec_last = wall_started
+            if gap > 0:
+                load = (time.thread_time() - started) / gap
+                self._spec_load = 0.9 * self._spec_load + 0.1 * load
 
     def _process_frame(self, frame: np.ndarray):
         s = self.settings
@@ -572,9 +693,7 @@ class Radio:
         # --- spectrum -----------------------------------------------------
         seg = self._spectrum_block(frame)
         if seg is not None:
-            db = self.spectrum(seg)
-            if db is not None and self.on_spectrum is not None:
-                self.on_spectrum(center, db, s.sample_rate)
+            self._submit_spectrum(seg, center, s.sample_rate)
 
         # --- demodulation -------------------------------------------------
         offset = s.tuned_freq - center + self.demod.mix_shift

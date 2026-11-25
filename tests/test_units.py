@@ -537,6 +537,28 @@ from rspsdr.radio import Radio  # noqa: E402
 errors: list[str] = []
 radio = Radio(Settings(sample_rate=1500000, center_freq=9_000_000.0,
                        tuned_freq=9_000_000.0), on_error=errors.append)
+for _rate, _nfft, _cap in ((8_000_000, 65536, 2), (6_000_000, 65536, 16),
+                            (8_000_000, 32768, 4), (8_000_000, 16384, 8),
+                            (8_000_000, 4096, 16)):
+    _probe = Radio(Settings(sample_rate=_rate, n_fft=_nfft))
+    check(f"the spectrum cap at {_rate / 1e6:g} MSps and {_nfft} points",
+          _probe._spectrum_segment_cap() == _cap,
+          f"{_probe._spectrum_segment_cap()} segments")
+check("8 MSps with a large FFT smooths the spectrum over time",
+      abs(Radio(Settings(sample_rate=8_000_000, n_fft=65536)).spectrum.avg
+          - 0.80) < 1e-9,
+      "effective smoothing is raised to 0.80")
+check("2-6 MSps keeps the stored spectrum smoothing",
+      Settings(sample_rate=6_000_000, n_fft=65536).effective_spec_avg()
+      == Settings(sample_rate=6_000_000, n_fft=65536).spec_avg,
+      str(Settings(sample_rate=6_000_000, n_fft=65536).effective_spec_avg()))
+check("a heavier stored smoothing still wins at 8 MSps",
+      Settings(sample_rate=8_000_000, n_fft=65536,
+               spec_avg=0.9).effective_spec_avg() == 0.9)
+_probe.apply(n_fft=65536)
+check("changing to a large FFT live picks up the smoothing",
+      abs(_probe.spectrum.avg - 0.80) < 1e-9,
+      f"effective smoothing {_probe.spectrum.avg}")
 check("the receiver span is its sample rate", radio.span == 1_500_000.0, str(radio.span))
 radio.set_tuned(9_600_000.0)
 radio.recenter_on_tuned()

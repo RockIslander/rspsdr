@@ -242,12 +242,11 @@ The picture itself is divided by a splitter whose divider you can drag, and the
 shares favour the history: the spectrum — the tuning aid — stops at 200 px in a
 very tall window and yields to the waterfall first in a short one, so what the
 divider really decides is how quickly the waterfall takes the rest. The
-frequency scale is drawn once, under the spectrum; the waterfall used to carry a
-second copy of it, 42 px of ruler a couple of hundred pixels below the first,
-and that strip is 42 rows of history now. The waterfall has no left-hand gutter
-either: its picture runs from one edge of the window to the other, where the 62
-px the old hidden axis held is picture now, and the `‹` and `›` buttons over its
-edges page the view half a window left or right. At 1360x768 the window opens at
+frequency scale is drawn once, under the spectrum. The dB scale is an overlay
+inside the spectrum rather than a reserved column, so its labels sit over the
+left edge of the trace; the waterfall uses the full width of the window too,
+and both pictures share one frequency map. The `‹` and `›` buttons over the
+waterfall's edges page the view half a window left or right. At 1360x768 the window opens at
 1280x728, and the waterfall gets 304 px of history with the settings on show and
 386 with them folded — where, before all of this, the needle meter and the
 second frequency scale left it 152.
@@ -389,6 +388,14 @@ stop at. That only became affordable when the transform moved to `scipy.fft`:
 measured here, sixteen 16384-point transforms of complex64 take 2.1 ms where
 `numpy.fft` took 5.2 ms, and the app's share of one core at 2 MSps is 11.8 % at
 4096, 13.2 % at 16384 and 17.5 % at 65536.
+
+At 8 MSps the spectrum transform is no longer allowed to hold up the radio: it
+runs on its own worker thread, and a frame that arrives while that worker is
+busy is skipped instead of queued. With a 65536-point FFT it averages at most
+two segments a frame above 7 MSps and raises the temporal smoothing to 0.80
+(a stored value above that still wins), which keeps the transform inside the
+40 ms frame and the waterfall readable; the RF path measured clean at 8 MSps,
+while 2–6 MSps keep the full sixteen-segment averaging.
 
 **Zoom** magnifies both plots about the receiver centre: 1x shows the whole
 receiver span, and 256x narrows it to a 7.8 kHz window at 2 MSps — 244 Hz at the
@@ -808,7 +815,8 @@ Every item below was reproduced first and re-measured afterwards.
   was ever handed to the spectrum. (125, 192, 250 and 384 kSps failed the same
   way once the FFT was set to 8192 or 16384.) The spectrum now carries the
   remainder of its transform from one call to the next, with the cost per hop
-  still capped at 16 segments, so the work does not grow with the sample rate.
+  still capped at 16 segments (two at 65536 points and 8 MSps), so a big FFT
+  cannot outgrow the frame.
 - **The window could not be built at a sample rate it did not offer.**
   `--rate 7000000` raised `ValueError: 7000000 is not in list` while the tuning
   row was being assembled. 7 and 9 MSps are now in the list, and any other rate
@@ -868,9 +876,11 @@ daylight.
 for HF), reduce the FFT size (at 2 MSps that is 11.8 % of one core at 4096 and
 17.5 % at 65536), or leave the waterfall **Detail** on *Screen*, which is both
 the sharpest and the cheapest setting. A repaint costs 11.1 ms of CPU a frame at
-*Screen* and 13.5 ms with a fixed 6400 columns. Dropping samples is the designed
-response to a machine that is too busy; the receiver stays in the present
-rather than drifting behind.
+*Screen* and 13.5 ms with a fixed 6400 columns. At 8 MSps the spectrum worker
+already skips frames rather than RF, so if drops persist on a busy machine try
+6 MSps: it is the best 14-bit setting for HF on the RSP1. Dropping samples is
+the designed response to a machine that is too busy; the receiver stays in the
+present rather than drifting behind.
 
 **Nothing above 30 MHz sounds right** — the RSP1 covers up to 2 GHz and the
 tuning accepts any frequency, but the presets and band data are aimed at HF.

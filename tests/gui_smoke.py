@@ -771,28 +771,48 @@ def main() -> int:
               win._zoom == 1 and win.lbl_zoom.text() == f"{span/1e6:g} MHz",
               f"zoom {win._zoom}x, readout “{win.lbl_zoom.text()}”")
 
-        # ---- the waterfall runs edge to edge ---------------------------
-        # It has no scale of its own and now no gutter either: the picture
-        # starts at the plot's own left edge and ends at its right.  The
-        # spectrum keeps its dB scale, so the two no longer share a plot area;
-        # each maps clicks and drags from its own view box, which is what the
-        # tuning below exercises.
+        # ---- the two plots share one full-width frequency map ------------
+        # The dB scale is an overlay inside the spectrum, so both view boxes
+        # run edge to edge and a carrier clicked above is at the same x below.
         areas = {}
         for name, plot in (("spectrum", win.spectrum),
                            ("waterfall", win.waterfall)):
             r = plot.plotItem.vb.sceneBoundingRect()
             areas[name] = (r.x(), r.x() + r.width())
-        check("the waterfall picture reaches both sides of the plot",
-              areas["waterfall"][0] < 2.0
-              and areas["waterfall"][1] - areas["waterfall"][0]
-              >= win.waterfall.width() - 4.0,
-              f"waterfall {areas['waterfall'][0]:.1f}.."
-              f"{areas['waterfall'][1]:.1f} px in a "
-              f"{win.waterfall.width()} px widget")
-        check("and the spectrum keeps its dB scale beside it",
-              areas["spectrum"][0] >= 30.0,
+        check("the spectrum and waterfall share a full-width plot area",
+              abs(areas["waterfall"][0] - areas["spectrum"][0]) <= 1.0
+              and abs(areas["waterfall"][1] - areas["spectrum"][1]) <= 1.0
+              and areas["spectrum"][0] < 2.0
+              and areas["spectrum"][1] >= win.spectrum.width() - 4.0,
               f"spectrum {areas['spectrum'][0]:.1f}.."
-              f"{areas['spectrum'][1]:.1f} px")
+              f"{areas['spectrum'][1]:.1f} px, waterfall "
+              f"{areas['waterfall'][0]:.1f}..{areas['waterfall'][1]:.1f} px "
+              f"in a {win.spectrum.width()} px widget")
+        check("the spectrum keeps its dB scale as an overlay",
+              win.spectrum.getAxis("left").width() == 0
+              and win.spectrum.db_scale.isVisible()
+              and abs(win.spectrum.db_scale.boundingRect().width()
+                      - ui.PLOT_AXIS_WIDTH) < 0.5,
+              f"axis width {win.spectrum.getAxis('left').width()}, overlay "
+              f"{win.spectrum.db_scale.boundingRect().width():.0f} px")
+
+        def max_gap(lo: float, hi: float) -> float:
+            """Largest horizontal disagreement between the two plot maps."""
+            def pixel(plot, freq: float) -> float:
+                vb = plot.plotItem.vb
+                scene = vb.mapViewToScene(QPointF(freq / 1e6, 0.0))
+                return plot.mapFromScene(scene).x()
+
+            probes = (lo + frac * (hi - lo) for frac in (0.2, 0.5, 0.8))
+            return max(abs(pixel(win.spectrum, f) - pixel(win.waterfall, f))
+                       for f in probes)
+
+        def render_window(center: float):
+            """Run the real render path once; return both actual view ranges."""
+            win._latest = (center, np.full(64, -90.0, np.float32), span)
+            win._render()
+            return (win.spectrum.plotItem.vb.viewRange()[0],
+                    win.waterfall.plotItem.vb.viewRange()[0])
 
         # A real click on the waterfall must land where the screen says it will.
         was_tuned = win.settings.tuned_freq
@@ -838,6 +858,19 @@ def main() -> int:
               win.settings.tuned_freq == tuned_before,
               f"tuned {tuned_before/1e6:.6f} -> "
               f"{win.settings.tuned_freq/1e6:.6f} MHz")
+        s_range, w_range = render_window(win.radio.settings.center_freq)
+        gap = max_gap(*s_range)
+        check("paging keeps the spectrum and waterfall on the same pixels",
+              abs(s_range[0] - w_range[0]) < 1e-9
+              and abs(s_range[1] - w_range[1]) < 1e-9
+              and abs((s_range[1] - s_range[0])
+                      - span / max(1, win._zoom) / 1e6) < 1e-6
+              and abs((s_range[0] + s_range[1]) / 2
+                      - win.radio.settings.center_freq / 1e6) < 1e-6
+              and gap <= 1.5,
+              f"spectrum {s_range[0]:.6f}..{s_range[1]:.6f} MHz, "
+              f"waterfall {w_range[0]:.6f}..{w_range[1]:.6f} MHz, "
+              f"max difference {gap:.1f} px")
         left.click()
         app.processEvents()
         check("and the left-hand button pages it back",
@@ -922,6 +955,19 @@ def main() -> int:
             """The plot area's own width, which is what Screen has to match."""
             wf = win.waterfall
             return int(round(wf.plotItem.vb.width() * wf.devicePixelRatioF()))
+
+        s_range, w_range = render_window(centre)
+        gap = max_gap(*s_range)
+        check("the spectrum and waterfall map a frequency to the same pixel",
+              abs(s_range[0] - w_range[0]) < 1e-9
+              and abs(s_range[1] - w_range[1]) < 1e-9
+              and abs((s_range[1] - s_range[0])
+                      - span / win._zoom / 1e6) < 1e-6
+              and abs((s_range[0] + s_range[1]) / 2 - centre / 1e6) < 1e-6
+              and gap <= 1.5,
+              f"{win._zoom}x, spectrum {s_range[0]:.6f}..{s_range[1]:.6f} MHz, "
+              f"waterfall {w_range[0]:.6f}..{w_range[1]:.6f} MHz, "
+              f"max difference {gap:.1f} px")
 
         offered = [c for _, c in ui.WF_DETAILS if c]
         check("the detail list starts at Screen and keeps the fixed sizes",
@@ -1051,9 +1097,10 @@ def main() -> int:
         pix = np.frombuffer(shot.constBits().asstring(shot.sizeInBytes()),
                             np.uint8).reshape(sh, shot.bytesPerLine() // 4, 4)[:, :sw, :]
         # The newest line is the first one drawn, at the top of the plot; the
-        # leftmost columns are the frequency scale, not the picture.
-        band = pix[0:14, ui.PLOT_AXIS_WIDTH:, :3].sum(axis=2).max(axis=0)
-        found = ui.PLOT_AXIS_WIDTH + int(np.argmax(band))
+        # dB overlay is painted over the left edge, but the carrier is at the
+        # centre, where the overlay does not reach.
+        band = pix[0:14, :, :3].sum(axis=2).max(axis=0)
+        found = int(np.argmax(band))
         scene = win.waterfall.plotItem.vb.mapViewToScene(QPointF(live / 1e6, 1.0))
         want = win.waterfall.mapFromScene(scene).x()
         check("the drawn picture puts a carrier where the axis says it is",
@@ -1131,6 +1178,19 @@ def main() -> int:
                                span, lo, hi)
             bins_at[step] = win.waterfall.bins()
         deepest = max(ladder)
+        s_range, w_range = render_window(live)
+        gap = max_gap(*s_range)
+        check("the deepest zoom keeps one frequency map",
+              abs(s_range[0] - w_range[0]) < 1e-9
+              and abs(s_range[1] - w_range[1]) < 1e-9
+              and abs((s_range[1] - s_range[0])
+                      - span / deepest / 1e6) < 1e-6
+              and abs((s_range[0] + s_range[1]) / 2 - live / 1e6) < 1e-6
+              and gap <= 1.5,
+              f"{deepest}x, {span / deepest / 1e3:.3f} kHz window, "
+              f"spectrum {s_range[0]:.6f}..{s_range[1]:.6f} MHz, "
+              f"waterfall {w_range[0]:.6f}..{w_range[1]:.6f} MHz, "
+              f"max difference {gap:.1f} px")
         win.cmb_zoom.setCurrentIndex(win.cmb_zoom.findData(was_zoom))
         win.cmb_wfdetail.setCurrentIndex(detail_index(was_detail))
         win.waterfall.clear_history()

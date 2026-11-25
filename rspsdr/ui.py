@@ -153,13 +153,11 @@ ZOOM_MAX = ZOOMS[-1][1]                 # the ladder's deepest step
 # arithmetic and tests/test_units.py checks the tie.
 FFTS = (1024, 2048, 4096, 8192, 16384, 32768, 65536)
 
-# Width of the spectrum's left axis -- the dB scale and room for its numbers.
-#
-# The waterfall has no axis and no gutter: its picture runs to both edges of
-# its half of the window, which is 62 px of history the old hidden axis used to
-# hold.  The two plots therefore no longer share a plot area, and nothing needs
-# them to: each maps clicks and drags from its own view box (see _axis_px_map),
-# rather than assuming the other's geometry.
+# Width of the spectrum's dB overlay.  It is painted *inside* the plot rather
+# than reserved from the layout: the axis itself is zero-width, both plots run
+# the full width of the window, and they therefore share one frequency map.
+# The overlay covers the left edge of the trace, which is the price of keeping
+# the full-width waterfall without giving the two pictures different scales.
 PLOT_AXIS_WIDTH = 62
 
 # Waterfall history depth: one row per repaint, so this is how much of the
@@ -618,6 +616,85 @@ class BandMarkers(pg.GraphicsObject):
         p.restore()
 
 
+class DbScale(pg.GraphicsObject):
+    """The spectrum's dB scale, painted over the left edge of the plot.
+
+    A real axis has to reserve a column, and reserving it for the spectrum
+    while the waterfall ran full width put the same frequency at different x
+    positions in the two pictures.  This is an overlay instead: the zero-width
+    axis still supplies the horizontal grid, while the labels and tick marks
+    are painted here over the first ``PLOT_AXIS_WIDTH`` pixels of the trace.
+    """
+
+    WIDTH = PLOT_AXIS_WIDTH
+
+    def __init__(self, plot: pg.PlotWidget):
+        super().__init__()
+        self._vb = plot.plotItem.vb
+        self._font = mono_font(8)
+        self._text = QColor("#7f97ab")
+        self._line = QColor("#30404f")
+        self._fill = QColor(10, 12, 16)
+        self.setParentItem(self._vb)
+        self.setZValue(100)
+        self._vb.sigYRangeChanged.connect(lambda *_: self.update())
+        self._vb.sigResized.connect(lambda *_: self.update())
+
+    def set_colours(self, text: str, line: str, fill: str) -> None:
+        self._text = QColor(text)
+        self._line = QColor(line)
+        self._fill = QColor(fill)
+        self.update()
+
+    def boundingRect(self) -> QRectF:
+        r = self._vb.rect()
+        return QRectF(r.left(), r.top(), self.WIDTH, r.height())
+
+    @staticmethod
+    def _step(span: float) -> float:
+        raw = span / 4.0
+        mag = 10.0 ** np.floor(np.log10(raw))
+        return min((mag, 2.0 * mag, 5.0 * mag, 10.0 * mag),
+                   key=lambda step: abs(step - raw))
+
+    def paint(self, p, *args):
+        r = self._vb.rect()
+        if r.width() <= 0.0 or r.height() <= 0.0:
+            return
+        lo, hi = self._vb.viewRange()[1]
+        if not hi > lo:
+            return
+        fill = QColor(self._fill)
+        fill.setAlpha(210)
+        p.save()
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(fill))
+        p.drawRect(QRectF(r.left(), r.top(), self.WIDTH, r.height()))
+        x = r.left() + self.WIDTH - 1.0
+        p.setPen(QPen(self._line, 1.0))
+        p.drawLine(QPointF(x, r.top()), QPointF(x, r.bottom()))
+
+        p.setFont(self._font)
+        step = self._step(hi - lo)
+        start = np.ceil(lo / step) * step
+        for value in np.arange(start, hi + step * 0.5, step):
+            y = r.top() + (hi - value) / (hi - lo) * r.height()
+            if y < r.top() + 10.0 or y > r.bottom() - 4.0:
+                continue
+            p.setPen(QPen(self._line, 1.0))
+            p.drawLine(QPointF(x - 6.0, y), QPointF(x, y))
+            p.setPen(QPen(self._text))
+            p.drawText(QRectF(r.left() + 2.0, y - 7.0,
+                              self.WIDTH - 12.0, 14.0),
+                       Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                       f"{value:g}")
+        p.setPen(QPen(self._text))
+        p.drawText(QRectF(r.left() + 2.0, r.top() + 2.0,
+                          self.WIDTH - 10.0, 12.0),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, "dB")
+        p.restore()
+
+
 class SpectrumPlot(pg.PlotWidget):
     """Spectrum with click/drag tuning."""
 
@@ -633,15 +710,16 @@ class SpectrumPlot(pg.PlotWidget):
         self.setMouseEnabled(x=False, y=False)
         self.hideButtons()
         self.showGrid(x=True, y=True, alpha=0.18)
-        self.setLabel("left", "dB")
-        # This is the window's frequency scale, and the only one: the waterfall
-        # below used to carry a second copy of it, 42 px of ruler drawn a
-        # couple of hundred pixels under this one, and every one of those
-        # pixels was a line of history the waterfall did not get (see
-        # WaterfallPlot.__init__).
-        self.setLabel("bottom", "MHz")
-        self.getAxis("left").setWidth(PLOT_AXIS_WIDTH)
+        # The dB scale is painted by DbScale over the plot's left edge.  The
+        # axis is kept only as a zero-width source of horizontal grid lines,
+        # so the trace uses the whole widget and shares its map with the
+        # full-width waterfall below.
+        left_axis = self.getAxis("left")
+        left_axis.setWidth(0)
         two_tick_levels(self)
+        left_axis.setStyle(showValues=False, tickLength=0)
+        left_axis.setPen(pg.mkPen(None))
+        self.setLabel("bottom", "MHz")
         self.setYRange(-120.0, 0.0)
 
         self.curve = self.plot([], [], pen=pg.mkPen("#7fe7ff", width=1.2))
@@ -660,6 +738,7 @@ class SpectrumPlot(pg.PlotWidget):
         self.addItem(self.marker)
 
         self.band_markers = BandMarkers(self)
+        self.db_scale = DbScale(self)
 
         self._freqs = None
         self._center = 0.0
@@ -866,11 +945,8 @@ class WaterfallPlot(pg.PlotWidget):
         # the pixel-to-frequency mapping is sampled from the view box (see
         # _axis_px_map), not from the axis item.
         self.hideAxis("bottom")
-        # ... and the left axis too.  The waterfall used to keep a hidden 62 px
-        # gutter there so its plot area lined up with the spectrum's; the
-        # picture is the point of the window, and it now runs from one edge of
-        # its half to the other.  The frequency scale above it is the only
-        # ruler either plot needs.
+        # No left gutter: the spectrum's dB scale is an overlay now, so both
+        # plots can run from edge to edge while sharing one frequency map.
         self.hideAxis("left")
         self.setContentsMargins(0, 0, 0, 0)
         two_tick_levels(self)
@@ -2757,6 +2833,7 @@ class MainWindow(QMainWindow):
                 axis.setPen(pg.mkPen(p["grid"], width=1.0))
                 axis.setTextPen(pg.mkPen(p["muted"]))
             plot.band_markers.set_colours(p["muted"], p["plot"])
+        self.spectrum.db_scale.set_colours(p["muted"], p["grid"], p["plot"])
         self.waterfall.set_pan_style(p)
         # The grid's colour follows the axis pen; this is only how strongly it
         # is drawn, and a light scheme needs more of it to be seen at all.
