@@ -40,6 +40,7 @@ os.environ["XDG_CONFIG_HOME"] = os.path.join(TMP, "config")
 
 import rspsdr.ui as ui_mod  # noqa: E402
 from rspsdr import __main__ as main_mod  # noqa: E402
+from rspsdr import bands  # noqa: E402
 from rspsdr import prefs  # noqa: E402
 from rspsdr.radio import Settings  # noqa: E402
 
@@ -531,6 +532,46 @@ check("and the file follows the mode back out of FT8",
       final["mode"] == "am" and final["nr"] is True
       and final["audio_agc"] is True and final["squelch_db"] == -90.0,
       json.dumps({k: final[k] for k in ("mode", "nr", "audio_agc", "squelch_db")}))
+
+# The 8.33 kHz step is the one a restart could lose without anyone noticing:
+# it is written down as a whole number of hertz, and a window that could not
+# find that number in its list would quietly open on the 1 kHz default instead.
+# So it gets a restart of its own -- and the dial is asked to take a step
+# afterwards, because a box that came back reading 8.33 kHz while adding a
+# rounded 8333 Hz would drift off the channel just as silently.
+narrow_path = tmp_path("narrow.json")
+narrow_win = window(Settings(), store=prefs.PrefsStore(narrow_path))
+narrow_win.cmb_step.setCurrentIndex(
+    narrow_win.cmb_step.findData(bands.NARROW_STEP_HZ))
+check("the list offers the 8.33 kHz step, and the dial takes its grid",
+      narrow_win._narrow and narrow_win.spn_freq.singleStep() == 0.0,
+      narrow_win.cmb_step.currentText())
+narrow_win.close()
+remembered_step = json.load(open(narrow_path))["ui"].get("step")
+check("it is remembered as a whole 8333 Hz, not a rounded 8 kHz",
+      remembered_step == 8_333, str(remembered_step))
+
+narrow_store = prefs.PrefsStore(narrow_path)
+narrow_again = window(
+    main_mod._make_settings(main_mod.build_parser().parse_args([]),
+                            narrow_store, main_mod._typed_options([])),
+    store=narrow_store)
+check("a restart comes back on 8.33 kHz, not on the 1 kHz default",
+      narrow_again.cmb_step.currentData() == bands.NARROW_STEP_HZ
+      and narrow_again._narrow and narrow_again.spn_freq.narrow
+      and narrow_again.spn_freq.singleStep() == 0.0,
+      narrow_again.cmb_step.currentText())
+narrow_again.spn_freq.setValue(121.500)
+narrow_again.spn_freq.stepBy(1)
+first_step = narrow_again.spn_freq.value() * 1e6
+narrow_again.spn_freq.stepBy(1)
+second_step = narrow_again.spn_freq.value() * 1e6
+check("... and the dial still walks the airband grid, in whole hertz",
+      (round(first_step), round(second_step)) == (121_508_333, 121_516_667)
+      and abs(first_step - 121_508_333) < 1e-6
+      and abs(second_step - 121_516_667) < 1e-6,
+      f"{first_step:.6f} Hz then {second_step:.6f} Hz")
+narrow_again.close()
 
 # A window restored off the edge of every screen is worse than one that opens
 # in the middle: monitors are unplugged and resolutions change.
