@@ -3415,8 +3415,11 @@ class MainWindow(QMainWindow):
         bd = self.cmb_band.itemData(idx)
         if bd is None:
             return
-        self.spn_freq.setValue(bd.centre / 1e6)
-        self.spn_center.setValue(bd.centre / 1e6)
+        # Land on the band's reference channel where the plan names one --
+        # 146.520 on 2 m, 446.000 on 70 cm, channel 16 on marine, guard on the
+        # airband, WX-1 on weather -- and on its middle where it does not.
+        self.spn_freq.setValue(bd.jump / 1e6)
+        self.spn_center.setValue(bd.jump / 1e6)
         self._select_mode(bd.mode)
         self.cmb_band.setCurrentIndex(0)
 

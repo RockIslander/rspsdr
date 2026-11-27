@@ -164,8 +164,8 @@ on channels 25 kHz apart. Europe's 8.33 kHz channels cut each of those in three
 them on that grid, rounding once at the end — a rounded 8333 Hz added three
 times would leave the dial at 118.024999. That step or **25 kHz**, with the
 6 kHz AM filter, is what to tune the band with. The band
-markers name both blocks, **Jump to band…** lands in the middle of each, and
-**Presets…** jumps to Air guard (121.500, the emergency channel and the one to
+markers name both blocks, **Jump to band…** lands on guard (121.500) rather than
+in the middle of the airband, and **Presets…** jumps to Air guard (121.500, the emergency channel and the one to
 check an antenna against), UNICOM and air-to-air — airport frequencies differ
 from field to field, so the presets are the three that mean the same thing
 anywhere. It needs a VHF antenna: an HF wire hears very little at 120 MHz, and

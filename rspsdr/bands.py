@@ -1,7 +1,8 @@
 """Band plan and tuning presets for HF, shortwave, VHF and UHF.
 
 Ham segments follow the IARU Region 2 plan (the Americas), which is what is
-relevant for a receiver in North America.  Shortwave broadcast bands are the
+relevant for a receiver in North America; 70 cm uses the wider US allocation,
+420-450, so that 446.000 is inside its own band.  Shortwave broadcast bands are the
 standard metre bands.  The VHF blocks name the service a listener finds there
 rather than listing every channel, which no band plan could keep up with.
 """
@@ -18,10 +19,22 @@ class Band:
     high: float         # Hz
     mode: str           # default demodulator
     note: str = ""
+    # A jump should land on a channel someone is likely to be on, not on the
+    # arithmetic middle of a block: the middle of 2 m is 146.000 and of 70 cm
+    # is 435.000, and both are usually empty.  Only the bands with a channel
+    # that means the same thing everywhere name one; the rest fall back to
+    # their middle.
+    reference: float | None = None   # Hz, the channel a jump should land on
 
     @property
     def centre(self) -> float:
         return 0.5 * (self.low + self.high)
+
+    @property
+    def jump(self) -> float:
+        """Where a band jump lands: the reference channel when the plan names
+        one, otherwise the middle of the block."""
+        return self.reference if self.reference is not None else self.centre
 
 
 # --- amateur bands (IARU Region 2) -------------------------------------
@@ -37,8 +50,10 @@ HAM_BANDS: list[Band] = [
     Band("12m", 24_890_000, 24_990_000, "usb", "day"),
     Band("10m", 28_000_000, 29_700_000, "usb", "day, Es"),
     Band("6m", 50_000_000, 54_000_000, "usb", "sporadic E"),
-    Band("2m", 144_000_000, 148_000_000, "nfm", "FM & SSB"),
-    Band("70cm", 430_000_000, 440_000_000, "nfm", "FM & SSB"),
+    Band("2m", 144_000_000, 148_000_000, "nfm", "FM & SSB",
+         reference=146_520_000),
+    Band("70cm", 420_000_000, 450_000_000, "nfm", "US, 446.000 FM",
+         reference=446_000_000),
 ]
 
 # --- shortwave broadcast (metre bands) ---------------------------------
@@ -64,7 +79,8 @@ SW_BANDS: list[Band] = [
 # AM, on 25 kHz channels (8.33 kHz in Europe).
 AIR_BANDS: list[Band] = [
     Band("Air nav", 108_000_000, 118_000_000, "am", "VOR/ILS"),
-    Band("Air band", 118_000_000, 137_000_000, "am", "voice"),
+    Band("Air band", 118_000_000, 137_000_000, "am", "voice",
+         reference=121_500_000),
 ]
 
 # --- the rest of VHF: 137-174 MHz -------------------------------------
@@ -88,23 +104,27 @@ VHF_BANDS: list[Band] = [
          "police, fire, business"),
     Band("Land mobile", 148_000_000, 156_000_000, "nfm", "12.5 kHz"),
     Band("Marine ship", 156_000_000, 157_425_000, "nfm",
-         "ch 16 = 156.800"),
+         "ch 16 = 156.800", reference=156_800_000),
     Band("Business", 157_450_000, 160_600_000, "nfm", "12.5 kHz"),
     Band("Marine coast", 160_600_000, 162_037_500, "nfm",
          "duplex pairs"),
     Band("Government", 162_050_000, 162_387_500, "nfm",
          "federal, 162.05-162.39"),
-    Band("NOAA weather", 162_400_000, 162_550_000, "nfm", "7 channels"),
+    Band("NOAA weather", 162_400_000, 162_550_000, "nfm", "7 channels",
+         reference=162_550_000),
     Band("Government", 162_562_500, 173_400_000, "nfm",
          "federal, 162.56-173.4"),
 ]
 
 # --- UHF: the amateur band and the land mobile blocks above it ---------
-# 430-440 is the 70 cm amateur band, which sits in HAM_BANDS with the
-# others.  Above it the land mobile services are in duplex pairs: the mobile
-# side transmits low in the band and the base side high, so a listener hears
-# the base side and finds the mobiles on the other half.  700 MHz is the
-# public safety and LTE band, ending at the guard above its uplink.  The
+# 420-450 is the 70 cm amateur band as the US allocates it, which is what
+# puts 446.000, the national FM simplex channel, inside it; the IARU Region 2
+# plan draws the band at 430-440, which would leave that channel outside its
+# own band.  70 cm sits in HAM_BANDS with the others.  Above it the land
+# mobile services are in duplex pairs: the mobile side transmits low in the
+# band and the base side high, so a listener hears the base side and finds
+# the mobiles on the other half.  700 MHz is the public safety and LTE band,
+# ending at the guard above its uplink.  The
 # cellular blocks between the 800 MHz halves, and the television allocations
 # below 700 MHz, are left unnamed: they are not what this receiver is for,
 # and a gap is more honest than a name over traffic you cannot hear.

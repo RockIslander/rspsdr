@@ -435,8 +435,8 @@ def main() -> int:
         idx = next(i for i in range(win.cmb_band.count())
                    if getattr(win.cmb_band.itemData(i), "name", None) == "Air band")
         win.cmb_band.setCurrentIndex(idx)
-        check("the airband is in the band list, and jumps to its middle in AM",
-              abs(win.settings.tuned_freq - 127_500_000) < 1.0
+        check("the airband is in the list, and jumps to guard in AM",
+              abs(win.settings.tuned_freq - 121_500_000) < 1.0
               and win.settings.mode == "am",
               f"{win.settings.tuned_freq/1e6:.6f} MHz, mode {win.settings.mode}")
 
@@ -445,8 +445,8 @@ def main() -> int:
         idx = next(i for i in range(win.cmb_band.count())
                    if getattr(win.cmb_band.itemData(i), "name", None) == "2m")
         win.cmb_band.setCurrentIndex(idx)
-        check("the 2 m band is in the list, and jumps to its middle in FM",
-              abs(win.settings.tuned_freq - 146_000_000) < 1.0
+        check("the 2 m band jumps to its FM calling channel, 146.520",
+              abs(win.settings.tuned_freq - 146_520_000) < 1.0
               and win.settings.mode == "nfm",
               f"{win.settings.tuned_freq/1e6:.6f} MHz, mode {win.settings.mode}")
 
@@ -454,11 +454,27 @@ def main() -> int:
         idx = next(i for i in range(win.cmb_band.count())
                    if getattr(win.cmb_band.itemData(i), "name", None) == "70cm")
         win.cmb_band.setCurrentIndex(idx)
-        check("the 70 cm band is in the list, and jumps to its middle in FM",
-              abs(win.settings.tuned_freq - 435_000_000) < 1.0
+        check("the 70 cm band jumps to its FM calling channel, 446.000",
+              abs(win.settings.tuned_freq - 446_000_000) < 1.0
               and win.settings.mode == "nfm",
               f"{win.settings.tuned_freq/1e6:.6f} MHz, "
               f"mode {win.settings.mode}")
+
+        # The marine and weather blocks have a channel that means the same
+        # thing everywhere too, so a jump lands on it rather than on the
+        # middle of the block, which for marine is 156.712 (ch 14) and for
+        # weather is 162.475 (WX-3).
+        for name, want in (("Marine ship", 156_800_000),
+                           ("NOAA weather", 162_550_000)):
+            idx = next(i for i in range(win.cmb_band.count())
+                       if getattr(win.cmb_band.itemData(i), "name", None)
+                       == name)
+            win.cmb_band.setCurrentIndex(idx)
+            check(f"a jump to {name} lands on its reference channel",
+                  abs(win.settings.tuned_freq - want) < 1.0
+                  and win.settings.mode == "nfm",
+                  f"{win.settings.tuned_freq/1e6:.6f} MHz, "
+                  f"mode {win.settings.mode}")
         idx = next(i for i in range(win.cmb_band.count())
                    if getattr(win.cmb_band.itemData(i), "name", None)
                    == "800 MHz base")

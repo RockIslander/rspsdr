@@ -993,6 +993,23 @@ check("a band that ends exactly at the edge of the window is still marked",
       ", ".join(b.name for b in bands.bands_in_view(7_300_000, 7_300_000)))
 check("a band's centre is its midpoint",
       bands.find_band(3_700_000).centre == 3_750_000.0)
+check("a jump lands on the band's reference channel, not on its middle",
+      [(b.name, b.reference, b.jump) for b in bands.ALL_BANDS
+       if b.reference is not None]
+      == [("2m", 146_520_000, 146_520_000),
+          ("70cm", 446_000_000, 446_000_000),
+          ("Air band", 121_500_000, 121_500_000),
+          ("Marine ship", 156_800_000, 156_800_000),
+          ("NOAA weather", 162_550_000, 162_550_000)],
+      ", ".join(f"{b.name} {b.reference/1e6:.3f}" for b in bands.ALL_BANDS
+                if b.reference is not None))
+check("every reference channel is inside the band that names it",
+      all(b.low <= b.reference <= b.high for b in bands.ALL_BANDS
+          if b.reference is not None))
+check("a band with no reference channel still jumps to its middle",
+      bands.find_band(14_175_000).jump == 14_175_000.0
+      and bands.find_band(14_175_000).jump
+      == bands.find_band(14_175_000).centre)
 check("an airband frequency is found, and a window there marks it",
       bands.find_band(121_500_000).name == "Air band"
       and bands.find_band(110_000_000).name == "Air nav"
@@ -1054,7 +1071,7 @@ check("every NOAA weather channel is named weather, not government",
 uhf_blocks = sorted(bands.UHF_BANDS
                     + [b for b in bands.HAM_BANDS if b.name == "70cm"],
                     key=lambda b: b.low)
-check("UHF 430-940 is the amateur band and the land mobile blocks, in order",
+check("UHF 420-940 is the amateur band and the land mobile blocks, in order",
       [b.name for b in uhf_blocks]
       == ["70cm", "UHF land mobile", "700 MHz mobile", "800 MHz mobile",
           "800 MHz base", "900 MHz mobile", "900 MHz base"]
