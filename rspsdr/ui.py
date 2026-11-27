@@ -1868,6 +1868,10 @@ class MainWindow(QMainWindow):
         # nothing is written back out of a half-built window.
         self._apply_saved_ui()
         self._building = False
+        # The dial may have been restored from the prefs while the window was
+        # still being built, when _freq_changed declines to run; name the band
+        # it came back on now that the widgets are settled.
+        self._update_band_readout(self.settings.tuned_freq)
         # ... and with the pane's state settled, the shortest this window may
         # be (before _restore_window_state, which asks for it).
         self._update_floor()
@@ -2277,10 +2281,13 @@ class MainWindow(QMainWindow):
         self.spn_freq.setValue(self.settings.tuned_freq / 1e6)
         lay.addWidget(self.spn_freq)
 
+        # The band the dial is sitting in.  Wide enough for the longest name
+        # in the plan ("UHF land mobile") so the row does not shuffle sideways
+        # as the dial crosses from one block into the next.
         self.lbl_band = QLabel("—")
         self.lbl_band.setFont(mono_font(11, True))
         self._tint(self.lbl_band, "accent")
-        self.lbl_band.setMinimumWidth(60)
+        self.lbl_band.setMinimumWidth(160)
         lay.addWidget(self.lbl_band)
 
         self.btn_step_down = QPushButton("◀")
@@ -3304,6 +3311,7 @@ class MainWindow(QMainWindow):
         f = mhz * 1e6
         self.radio.set_tuned(f)
         self.settings = self.settings.copy_with(tuned_freq=f)
+        self._update_band_readout(f)
         self._maybe_recentre(f)
 
     def _center_changed(self, mhz: float):
@@ -3573,6 +3581,24 @@ class MainWindow(QMainWindow):
 
     def _zoom_fit(self):
         self.cmb_zoom.setCurrentIndex(0)
+
+    def _update_band_readout(self, freq: float):
+        """Name the band the dial sits in, or a dash when it sits in none.
+
+        The plan is a set of blocks, not a continuous coat of paint: above
+        940 MHz, in the television allocations and in the gaps between the
+        VHF services there is no name to give, and a dash is the honest
+        answer rather than the nearest neighbour's label.
+        """
+        bd = bands.find_band(freq)
+        if bd is None:
+            self.lbl_band.setText("—")
+            self.lbl_band.setToolTip("")
+            return
+        self.lbl_band.setText(bd.name)
+        self.lbl_band.setToolTip(
+            f"{bd.name}  {bd.low/1e6:g}-{bd.high/1e6:g} MHz, "
+            f"{bd.mode.upper()}")
 
     def _update_zoom_readout(self):
         """How much frequency is across the window, at the zoom in force.

@@ -469,6 +469,25 @@ def main() -> int:
               f"{win.settings.tuned_freq/1e6:.6f} MHz, "
               f"mode {win.settings.mode}")
 
+        # The label under the dial names the band the receiver is actually in,
+        # and has to have something to say wherever the plan has a name -- it
+        # spent its whole life as a dash -- and a dash where the plan has none.
+        # These four cover the airband, a marine channel, 70 cm, and the gap
+        # where the military air allocation is deliberately left unnamed.
+        for freq, want in ((121_500_000, "Air band"),
+                           (156_800_000, "Marine ship"),
+                           (435_000_000, "70cm"),
+                           (250_000_000, "—")):
+            win.spn_freq.setValue(freq / 1e6)
+            check(f"the band readout names {want} at {freq/1e6:.3f} MHz",
+                  win.lbl_band.text() == want,
+                  f"showed {win.lbl_band.text()!r}")
+        win.spn_freq.setValue(121_500_000 / 1e6)
+        check("the band readout carries the band's range as its tooltip",
+              "118-137 MHz" in win.lbl_band.toolTip()
+              and "AM" in win.lbl_band.toolTip(),
+              repr(win.lbl_band.toolTip()))
+
         win.spn_center.setValue(14_200_000 / 1e6)
         check("centre control retunes the hardware",
               abs(win.radio.settings.center_freq - 14_200_000) < 1.0,
@@ -1813,6 +1832,10 @@ def main() -> int:
               abs(win.radio.settings.tuned_freq - 7_074_000) < 1.0
               and win.radio.demod.mode == "usb" and win._zoom == 1,
               f"{win.settings.tuned_freq/1e6:.6f} MHz {win.radio.demod.mode}")
+        check("the band readout follows a preset jump",
+              win.lbl_band.text() == "40m",
+              f"{win.settings.tuned_freq/1e6:.6f} MHz shows "
+              f"{win.lbl_band.text()!r}")
         check("the preset list returns to its placeholder",
               win.cmb_preset.currentIndex() == 0)
 
