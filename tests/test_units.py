@@ -1018,21 +1018,39 @@ vhf_blocks = sorted(bands.VHF_BANDS
 check("VHF 137-174 is split into its services, in order and not overlapping",
       [b.name for b in vhf_blocks]
       == ["Weather sat", "Public safety", "2m", "Land mobile",
-          "Marine VHF", "NOAA weather", "Government"]
+          "Marine ship", "Business", "Marine coast", "Government",
+          "NOAA weather", "Government"]
       and all(a.high <= b.low for a, b in zip(vhf_blocks, vhf_blocks[1:])),
       ", ".join(f"{b.name} {b.low/1e6:g}-{b.high/1e6:g}"
                 for b in vhf_blocks))
 check("a frequency in each of them is named by it",
       [(f, bands.find_band(f).name) for f in
        (137_500_000, 140_000_000, 146_520_000, 152_000_000, 156_800_000,
-        162_475_000, 165_000_000)]
+        159_000_000, 161_000_000, 162_200_000, 162_475_000, 165_000_000)]
       == [(137_500_000, "Weather sat"), (140_000_000, "Public safety"),
           (146_520_000, "2m"), (152_000_000, "Land mobile"),
-          (156_800_000, "Marine VHF"), (162_475_000, "NOAA weather"),
-          (165_000_000, "Government")],
+          (156_800_000, "Marine ship"), (159_000_000, "Business"),
+          (161_000_000, "Marine coast"), (162_200_000, "Government"),
+          (162_475_000, "NOAA weather"), (165_000_000, "Government")],
       ", ".join(f"{f/1e6:.3f} {bands.find_band(f).name}"
                 for f in (137_500_000, 140_000_000, 146_520_000,
-                          152_000_000, 156_800_000, 162_475_000, 165_000_000)))
+                          152_000_000, 156_800_000, 159_000_000,
+                          161_000_000, 162_200_000, 162_475_000, 165_000_000)))
+check("neither marine block claims the business pool between them",
+      [bands.find_band(f).name for f in
+       (157_450_000, 158_000_000, 159_000_000, 160_000_000, 160_600_000)]
+      == ["Business"] * 5,
+      ", ".join(f"{f/1e6:.3f} {bands.find_band(f).name}" for f in
+                (157_450_000, 158_000_000, 159_000_000, 160_000_000,
+                 160_600_000)))
+check("every NOAA weather channel is named weather, not government",
+      [bands.find_band(f).name for f in
+       (162_400_000, 162_425_000, 162_450_000, 162_475_000,
+        162_500_000, 162_525_000, 162_550_000)]
+      == ["NOAA weather"] * 7,
+      ", ".join(f"{f/1e6:.3f} {bands.find_band(f).name}" for f in
+                (162_400_000, 162_425_000, 162_450_000, 162_475_000,
+                 162_500_000, 162_525_000, 162_550_000)))
 vhf_presets = [p for p in bands.PRESETS if p.freq >= 137_000_000]
 check("the VHF presets sit in a VHF band, in a mode that band uses",
       len(vhf_presets) >= 5

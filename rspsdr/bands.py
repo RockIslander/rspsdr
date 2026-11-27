@@ -69,20 +69,28 @@ AIR_BANDS: list[Band] = [
 # --- the rest of VHF: 137-174 MHz -------------------------------------
 # Just above the airband are the weather satellites' APT downlinks, NOAA and
 # Meteor on 137.1-137.9; 144-148 is the 2 m amateur band, which sits in
-# HAM_BANDS with the others.  The rest is land mobile on 12.5 kHz channels:
-# public safety, business radio, the marine channels and the seven NOAA
-# weather channels, which are worth naming because they are the same
-# everywhere rather than field by field.
+# HAM_BANDS with the others.  The rest is land mobile, and the blocks follow
+# what is really there rather than one name per service: the marine channels
+# are two blocks with the business pool between them, and the federal pool
+# runs across 162.05-174 with the seven NOAA weather channels inside it, so
+# it is split at the channel edges either side of them.  A block stops at its
+# last channel, which leaves the narrow gaps between blocks you would expect
+# from the spacing, and means no block is named for traffic it does not carry.
 VHF_BANDS: list[Band] = [
     Band("Weather sat", 137_000_000, 138_000_000, "nfm", "NOAA APT"),
     Band("Public safety", 138_000_000, 144_000_000, "nfm",
          "police, fire, business"),
     Band("Land mobile", 148_000_000, 156_000_000, "nfm", "12.5 kHz"),
-    Band("Marine VHF", 156_000_000, 162_050_000, "nfm",
+    Band("Marine ship", 156_000_000, 157_425_000, "nfm",
          "ch 16 = 156.800"),
+    Band("Business", 157_450_000, 160_600_000, "nfm", "12.5 kHz"),
+    Band("Marine coast", 160_600_000, 162_037_500, "nfm",
+         "duplex pairs"),
+    Band("Government", 162_050_000, 162_387_500, "nfm",
+         "federal, 162.05-162.39"),
     Band("NOAA weather", 162_400_000, 162_550_000, "nfm", "7 channels"),
-    Band("Government", 162_550_000, 173_400_000, "nfm",
-         "federal, business"),
+    Band("Government", 162_562_500, 173_400_000, "nfm",
+         "federal, 162.56-173.4"),
 ]
 
 # Everything the two lookups below search, in one place.
