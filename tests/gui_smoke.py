@@ -450,6 +450,25 @@ def main() -> int:
               and win.settings.mode == "nfm",
               f"{win.settings.tuned_freq/1e6:.6f} MHz, mode {win.settings.mode}")
 
+        # ... and 70 cm, and one of the UHF land mobile blocks.
+        idx = next(i for i in range(win.cmb_band.count())
+                   if getattr(win.cmb_band.itemData(i), "name", None) == "70cm")
+        win.cmb_band.setCurrentIndex(idx)
+        check("the 70 cm band is in the list, and jumps to its middle in FM",
+              abs(win.settings.tuned_freq - 435_000_000) < 1.0
+              and win.settings.mode == "nfm",
+              f"{win.settings.tuned_freq/1e6:.6f} MHz, "
+              f"mode {win.settings.mode}")
+        idx = next(i for i in range(win.cmb_band.count())
+                   if getattr(win.cmb_band.itemData(i), "name", None)
+                   == "800 MHz base")
+        win.cmb_band.setCurrentIndex(idx)
+        check("the 800 MHz land mobile block is in the list, and jumps to it",
+              abs(win.settings.tuned_freq - 860_000_000) < 1.0
+              and win.settings.mode == "nfm",
+              f"{win.settings.tuned_freq/1e6:.6f} MHz, "
+              f"mode {win.settings.mode}")
+
         win.spn_center.setValue(14_200_000 / 1e6)
         check("centre control retunes the hardware",
               abs(win.radio.settings.center_freq - 14_200_000) < 1.0,

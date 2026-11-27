@@ -1,4 +1,4 @@
-"""Band plan and tuning presets for HF, shortwave and VHF.
+"""Band plan and tuning presets for HF, shortwave, VHF and UHF.
 
 Ham segments follow the IARU Region 2 plan (the Americas), which is what is
 relevant for a receiver in North America.  Shortwave broadcast bands are the
@@ -38,6 +38,7 @@ HAM_BANDS: list[Band] = [
     Band("10m", 28_000_000, 29_700_000, "usb", "day, Es"),
     Band("6m", 50_000_000, 54_000_000, "usb", "sporadic E"),
     Band("2m", 144_000_000, 148_000_000, "nfm", "FM & SSB"),
+    Band("70cm", 430_000_000, 440_000_000, "nfm", "FM & SSB"),
 ]
 
 # --- shortwave broadcast (metre bands) ---------------------------------
@@ -93,8 +94,31 @@ VHF_BANDS: list[Band] = [
          "federal, 162.56-173.4"),
 ]
 
+# --- UHF: the amateur band and the land mobile blocks above it ---------
+# 430-440 is the 70 cm amateur band, which sits in HAM_BANDS with the
+# others.  Above it the land mobile services are in duplex pairs: the mobile
+# side transmits low in the band and the base side high, so a listener hears
+# the base side and finds the mobiles on the other half.  700 MHz is the
+# public safety and LTE band, ending at the guard above its uplink.  The
+# cellular blocks between the 800 MHz halves, and the television allocations
+# below 700 MHz, are left unnamed: they are not what this receiver is for,
+# and a gap is more honest than a name over traffic you cannot hear.
+UHF_BANDS: list[Band] = [
+    Band("UHF land mobile", 450_000_000, 470_000_000, "nfm",
+         "business, public safety"),
+    Band("700 MHz mobile", 698_000_000, 805_000_000, "nfm",
+         "public safety, LTE"),
+    Band("800 MHz mobile", 806_000_000, 824_000_000, "nfm",
+         "repeater inputs"),
+    Band("800 MHz base", 851_000_000, 869_000_000, "nfm",
+         "repeater outputs"),
+    Band("900 MHz mobile", 896_000_000, 901_000_000, "nfm", "business"),
+    Band("900 MHz base", 935_000_000, 940_000_000, "nfm", "business"),
+]
+
 # Everything the two lookups below search, in one place.
-ALL_BANDS: list[Band] = HAM_BANDS + SW_BANDS + AIR_BANDS + VHF_BANDS
+ALL_BANDS: list[Band] = (HAM_BANDS + SW_BANDS + AIR_BANDS + VHF_BANDS
+                         + UHF_BANDS)
 
 # The 8.33 kHz channels of the European airband are each 25 kHz channel cut in
 # three, so they sit 25000/3 Hz apart: 118.000, 118.008333, 118.016667,

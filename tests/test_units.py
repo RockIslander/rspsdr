@@ -1051,6 +1051,25 @@ check("every NOAA weather channel is named weather, not government",
       ", ".join(f"{f/1e6:.3f} {bands.find_band(f).name}" for f in
                 (162_400_000, 162_425_000, 162_450_000, 162_475_000,
                  162_500_000, 162_525_000, 162_550_000)))
+uhf_blocks = sorted(bands.UHF_BANDS
+                    + [b for b in bands.HAM_BANDS if b.name == "70cm"],
+                    key=lambda b: b.low)
+check("UHF 430-940 is the amateur band and the land mobile blocks, in order",
+      [b.name for b in uhf_blocks]
+      == ["70cm", "UHF land mobile", "700 MHz mobile", "800 MHz mobile",
+          "800 MHz base", "900 MHz mobile", "900 MHz base"]
+      and all(a.high <= b.low for a, b in zip(uhf_blocks, uhf_blocks[1:])),
+      ", ".join(f"{b.name} {b.low/1e6:g}-{b.high/1e6:g}"
+                for b in uhf_blocks))
+check("a frequency in each UHF block is named by it",
+      [bands.find_band(f).name for f in
+       (435_000_000, 460_000_000, 750_000_000, 815_000_000,
+        860_000_000, 898_000_000, 937_000_000)]
+      == ["70cm", "UHF land mobile", "700 MHz mobile", "800 MHz mobile",
+          "800 MHz base", "900 MHz mobile", "900 MHz base"],
+      ", ".join(f"{f/1e6:.0f} {bands.find_band(f).name}" for f in
+                (435_000_000, 460_000_000, 750_000_000, 815_000_000,
+                 860_000_000, 898_000_000, 937_000_000)))
 vhf_presets = [p for p in bands.PRESETS if p.freq >= 137_000_000]
 check("the VHF presets sit in a VHF band, in a mode that band uses",
       len(vhf_presets) >= 5
