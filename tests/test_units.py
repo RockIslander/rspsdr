@@ -1074,8 +1074,19 @@ vhf_presets = [p for p in bands.PRESETS if p.freq >= 137_000_000]
 check("the VHF presets sit in a VHF band, in a mode that band uses",
       len(vhf_presets) >= 5
       and all(bands.find_band(p.freq) is not None
-              and p.mode in ("nfm", "usb") for p in vhf_presets),
-      ", ".join(f"{p.name} {p.freq/1e6:.3f}" for p in vhf_presets))
+              and p.mode in ("am", "nfm", "usb") for p in vhf_presets),
+      ", ".join(f"{p.name} {p.freq/1e6:.3f} {p.mode}"
+                for p in vhf_presets))
+apt = next(p for p in bands.PRESETS if p.name == "Weather APT")
+weather_sat = bands.find_band(137_500_000)
+check("the weather satellite block and its APT preset are AM, not FM",
+      weather_sat.name == "Weather sat" and weather_sat.mode == "am"
+      and apt.mode == "am",
+      f"{weather_sat.name} {weather_sat.mode}, preset {apt.mode}")
+check("the APT notes say the picture is wider than this receiver's filter",
+      "34 kHz" in weather_sat.note and "15 kHz" in weather_sat.note
+      and "34 kHz" in apt.note and "15 kHz" in apt.note,
+      f"{weather_sat.note!r} / {apt.note!r}")
 check("three 8.33 kHz steps climb a 25 kHz channel exactly",
       [bands.next_narrow_channel(f, 1)
        for f in (118_000_000, 118_008_333, 118_016_667)]

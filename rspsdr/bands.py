@@ -69,8 +69,12 @@ AIR_BANDS: list[Band] = [
 
 # --- the rest of VHF: 137-174 MHz -------------------------------------
 # Just above the airband are the weather satellites' APT downlinks, NOAA and
-# Meteor on 137.1-137.9; 144-148 is the 2 m amateur band, which sits in
-# HAM_BANDS with the others.  The rest is land mobile, and the blocks follow
+# Meteor on 137.1-137.9.  APT is amplitude modulated, not FM: the picture is
+# a 2.4 kHz subcarrier on an AM carrier about 34 kHz wide, so the block is AM.
+# This receiver's widest filter is 15 kHz, which is enough to hear that
+# subcarrier but not to decode an image; the note says so rather than implying
+# otherwise.  144-148 is the 2 m amateur band, which sits in HAM_BANDS with
+# the others.  The rest is land mobile, and the blocks follow
 # what is really there rather than one name per service: the marine channels
 # are two blocks with the business pool between them, and the federal pool
 # runs across 162.05-174 with the seven NOAA weather channels inside it, so
@@ -78,7 +82,8 @@ AIR_BANDS: list[Band] = [
 # last channel, which leaves the narrow gaps between blocks you would expect
 # from the spacing, and means no block is named for traffic it does not carry.
 VHF_BANDS: list[Band] = [
-    Band("Weather sat", 137_000_000, 138_000_000, "nfm", "NOAA APT"),
+    Band("Weather sat", 137_000_000, 138_000_000, "am",
+         "AM, 34 kHz; 15 kHz max"),
     Band("Public safety", 138_000_000, 144_000_000, "nfm",
          "police, fire, business"),
     Band("Land mobile", 148_000_000, 156_000_000, "nfm", "12.5 kHz"),
@@ -204,8 +209,8 @@ PRESETS: list[Preset] = [
     # are, and the satellites above the airband.
     Preset("Marine 16", 156_800_000, "nfm", "distress & calling",
            group="Marine"),
-    Preset("Weather APT", 137_100_000, "nfm", "NOAA/Meteor APT",
-           group="Weather"),
+    Preset("Weather APT", 137_100_000, "am",
+           "AM, 34 kHz; 15 kHz can't decode", group="Weather"),
     Preset("NOAA WX-1", 162_550_000, "nfm", "weather, most areas",
            group="Weather"),
 ]
