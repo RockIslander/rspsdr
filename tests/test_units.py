@@ -1105,6 +1105,25 @@ wrong_band = [f"{p.name} ({p.freq/1e6:.3f} MHz)" for p, want in named
               if (bands.find_band(p.freq) or bands.Band("", 0, 0, "am")).name != want]
 check("every preset that names a band is inside that band",
       named and not wrong_band, ", ".join(wrong_band) or f"{len(named)} band-named presets")
+sectioned = bands.presets_by_group()
+check("the presets are split into the seven labelled sections, in order",
+      [name for name, _ in sectioned] == list(bands.PRESET_GROUPS)
+      and all(items for _, items in sectioned)
+      and sum(len(items) for _, items in sectioned) == len(bands.PRESETS),
+      ", ".join(f"{name} {len(items)}" for name, items in sectioned))
+check("every preset names the section it is listed under",
+      all(p.group in bands.PRESET_GROUPS for p in bands.PRESETS),
+      ", ".join(sorted({p.group for p in bands.PRESETS})))
+sections = dict(sectioned)
+check("the sections hold the channels that belong to them",
+      [p.name for p in sections["Marine"]] == ["Marine 16"]
+      and [p.name for p in sections["Weather"]]
+      == ["Weather APT", "NOAA WX-1"]
+      and all(p.name.startswith("Air ") for p in sections["Aviation"])
+      and all(p.name.startswith(("WWV", "CHU")) for p in sections["Time"])
+      and {"2m SSB", "2m FM", "10m FM"}
+      <= {p.name for p in sections["Ham"]},
+      ", ".join(f"{name} {len(items)}" for name, items in sectioned))
 
 # ---------------------------------------------------------------- migration
 print("\n== command line interface ==")

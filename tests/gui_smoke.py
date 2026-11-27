@@ -1771,6 +1771,40 @@ def main() -> int:
         check("and releasing there ends the drag too",
               win.waterfall._dragging is False)
 
+        # ---- the preset list's sections ---------------------------------
+        # The list covers every service now, so it is split under one heading
+        # per section with a rule between them, rather than one flat run of
+        # names.  The headings are there to be read, not picked: a disabled
+        # row that somehow became selectable would take the menu over.
+        preset_model = win.cmb_preset.model()
+        headings = [(i, win.cmb_preset.itemText(i))
+                    for i in range(win.cmb_preset.count())
+                    if win.cmb_preset.itemText(i) in bands.PRESET_GROUPS]
+        check("the preset list is split into its seven labelled sections",
+              [text for _, text in headings] == list(bands.PRESET_GROUPS),
+              ", ".join(text for _, text in headings))
+        check("a section heading cannot be picked as a preset",
+              headings and all(
+                  not (preset_model.item(i).flags()
+                       & Qt.ItemFlag.ItemIsEnabled)
+                  for i, _ in headings),
+              f"{len(headings)} headings, "
+              f"{sum(1 for i, _ in headings if preset_model.item(i).isEnabled())}"
+              f" of them still enabled")
+        rules = [i for i in range(win.cmb_preset.count())
+                 if win.cmb_preset.itemData(i) is None
+                 and win.cmb_preset.itemText(i) not in bands.PRESET_GROUPS
+                 and win.cmb_preset.itemText(i) != "Presets…"]
+        check("a rule separates each section from the one before",
+              len(rules) == len(headings),
+              f"{len(rules)} rules for {len(headings)} sections")
+        check("each heading is followed by the presets it names",
+              all(win.cmb_preset.itemData(i + 1) is not None
+                  for i, _ in headings),
+              ", ".join(f"{text} -> "
+                        f"{getattr(win.cmb_preset.itemData(i + 1), 'name', '?')}"
+                        for i, text in headings))
+
         # ---- jumping to a preset, and the mode buttons ------------------
         idx = next(i for i in range(win.cmb_preset.count())
                    if getattr(win.cmb_preset.itemData(i), "name", None) == "40m FT8")

@@ -2321,8 +2321,21 @@ class MainWindow(QMainWindow):
 
         self.cmb_preset = QComboBox()
         self.cmb_preset.addItem("Presets…", None)
-        for p in bands.PRESETS:
-            self.cmb_preset.addItem(f"{p.name}  {p.freq/1e6:.4f}", p)
+        # A flat run of presets is hard to scan now that there are enough of
+        # them to cover every service, so they are listed under the section
+        # headings from bands.PRESET_GROUPS, with a rule between sections.  A
+        # heading is disabled -- it is there to be read, not picked -- and the
+        # presets themselves stay ordinary selectable entries under it.
+        for group, items in bands.presets_by_group():
+            self.cmb_preset.insertSeparator(self.cmb_preset.count())
+            self.cmb_preset.addItem(group, None)
+            head = self.cmb_preset.model().item(self.cmb_preset.count() - 1)
+            head.setFlags(Qt.ItemFlag.NoItemFlags)
+            font = head.font()
+            font.setItalic(True)
+            head.setFont(font)
+            for p in items:
+                self.cmb_preset.addItem(f"{p.name}  {p.freq/1e6:.4f}", p)
         lay.addWidget(self.cmb_preset)
 
         return w

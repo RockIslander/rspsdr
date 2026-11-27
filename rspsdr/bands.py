@@ -135,60 +135,94 @@ def next_narrow_channel(freq: float, direction: int) -> int:
     return round(k * AIRBAND_NARROW_HZ)
 
 # --- quick-jump "stations worth finding" -------------------------------
+# The list is long enough to need finding aids, so every preset carries the
+# section of the menu it belongs in, and the sections are declared here in
+# reading order: amateur activity first, then the standards and broadcasts a
+# listener checks an antenna against, then the services above 100 MHz.  The
+# group is the heading a preset is listed under, not a frequency range.
+PRESET_GROUPS: tuple[str, ...] = (
+    "Ham", "Time", "Broadcast", "Utility", "Aviation", "Marine", "Weather")
+
+
 @dataclass(frozen=True)
 class Preset:
     name: str
     freq: float
     mode: str
     note: str = ""
+    group: str = ""
 
 
 PRESETS: list[Preset] = [
-    # Amateur calling / activity
-    Preset("80m CW", 3_550_000, "cw", "CW calling"),
-    Preset("40m CW", 7_030_000, "cw", "CW calling"),
-    Preset("40m SSB", 7_200_000, "lsb", "USA phone"),
-    Preset("40m FT8", 7_074_000, "usb", "FT8, 3 kHz wide"),
-    Preset("30m FT8", 10_136_000, "usb", "FT8"),
-    Preset("20m SSB", 14_250_000, "usb", "USA phone"),
-    Preset("20m CW", 14_030_000, "cw", "CW calling"),
-    Preset("20m FT8", 14_074_000, "usb", "FT8"),
-    Preset("17m SSB", 18_130_000, "usb", "SSB"),
-    Preset("15m SSB", 21_300_000, "usb", "SSB"),
-    Preset("17m WSPR", 18_104_600, "usb", "WSPR dial"),
-    Preset("10m FM", 29_600_000, "nfm", "10m FM simplex"),
+    # Amateur calling / activity, from HF through 10 m and the 2 m channels
+    # that mean the same thing wherever you are.  10m FM and the 2 m pair are
+    # amateur channels, so they are listed here rather than with the services
+    # above the airband.
+    Preset("80m CW", 3_550_000, "cw", "CW calling", group="Ham"),
+    Preset("40m CW", 7_030_000, "cw", "CW calling", group="Ham"),
+    Preset("40m SSB", 7_200_000, "lsb", "USA phone", group="Ham"),
+    Preset("40m FT8", 7_074_000, "usb", "FT8, 3 kHz wide", group="Ham"),
+    Preset("30m FT8", 10_136_000, "usb", "FT8", group="Ham"),
+    Preset("20m SSB", 14_250_000, "usb", "USA phone", group="Ham"),
+    Preset("20m CW", 14_030_000, "cw", "CW calling", group="Ham"),
+    Preset("20m FT8", 14_074_000, "usb", "FT8", group="Ham"),
+    Preset("17m SSB", 18_130_000, "usb", "SSB", group="Ham"),
+    Preset("15m SSB", 21_300_000, "usb", "SSB", group="Ham"),
+    Preset("17m WSPR", 18_104_600, "usb", "WSPR dial", group="Ham"),
+    Preset("10m FM", 29_600_000, "nfm", "10m FM simplex", group="Ham"),
+    Preset("2m SSB", 144_200_000, "usb", "SSB calling", group="Ham"),
+    Preset("2m FM", 146_520_000, "nfm", "FM simplex", group="Ham"),
     # Time / standards -- excellent for checking your setup
-    Preset("WWV 2.5", 2_500_000, "am", "NIST time, AM"),
-    Preset("WWV 5", 5_000_000, "am", "NIST time, AM"),
-    Preset("WWV 10", 10_000_000, "am", "NIST time, AM"),
-    Preset("WWV 15", 15_000_000, "am", "NIST time, AM"),
-    Preset("WWV 20", 20_000_000, "am", "NIST time, AM"),
-    Preset("WWVH 10", 10_000_000, "am", "Hawaii, same channel"),
-    Preset("CHU 3.33", 3_330_000, "am", "Canada time, USB"),
-    Preset("CHU 7.85", 7_850_000, "am", "Canada time"),
-    Preset("CHU 14.67", 14_670_000, "am", "Canada time"),
+    Preset("WWV 2.5", 2_500_000, "am", "NIST time, AM", group="Time"),
+    Preset("WWV 5", 5_000_000, "am", "NIST time, AM", group="Time"),
+    Preset("WWV 10", 10_000_000, "am", "NIST time, AM", group="Time"),
+    Preset("WWV 15", 15_000_000, "am", "NIST time, AM", group="Time"),
+    Preset("WWV 20", 20_000_000, "am", "NIST time, AM", group="Time"),
+    Preset("WWVH 10", 10_000_000, "am", "Hawaii, same channel",
+           group="Time"),
+    Preset("CHU 3.33", 3_330_000, "am", "Canada time, USB", group="Time"),
+    Preset("CHU 7.85", 7_850_000, "am", "Canada time", group="Time"),
+    Preset("CHU 14.67", 14_670_000, "am", "Canada time", group="Time"),
     # Broadcasts
-    Preset("R. Nacional", 6_180_000, "am", "49m, Amazonia"),
-    Preset("BBC WS", 9_410_000, "am", "31m (varies)"),
-    Preset("VOA", 15_580_000, "am", "19m (varies)"),
-    Preset("WWCR", 13_845_000, "am", "22m Nashville"),
-    # Utility / marine
-    Preset("Volmet 5", 5_598_000, "usb", "HF VOLMET USB"),
-    Preset("HFDL", 10_081_000, "usb", "aircraft HFDL"),
+    Preset("R. Nacional", 6_180_000, "am", "49m, Amazonia",
+           group="Broadcast"),
+    Preset("BBC WS", 9_410_000, "am", "31m (varies)", group="Broadcast"),
+    Preset("VOA", 15_580_000, "am", "19m (varies)", group="Broadcast"),
+    Preset("WWCR", 13_845_000, "am", "22m Nashville", group="Broadcast"),
+    # Utility -- the aviation and shipping services on HF.
+    Preset("Volmet 5", 5_598_000, "usb", "HF VOLMET USB", group="Utility"),
+    Preset("HFDL", 10_081_000, "usb", "aircraft HFDL", group="Utility"),
     # Airband -- civil aviation, AM, on 25 kHz channels.  Airport frequencies
     # differ from field to field, so these are the channels that mean the same
     # thing wherever you are; 121.500 is the one to check an antenna against.
-    Preset("Air guard", 121_500_000, "am", "121.5 emergency"),
-    Preset("Air UNICOM", 122_800_000, "am", "UNICOM"),
-    Preset("Air air-to-air", 123_450_000, "am", "air-to-air"),
-    # VHF above the airband -- the satellites, 2 m, and the marine and weather
-    # channels that mean the same thing wherever you are.
-    Preset("Weather APT", 137_100_000, "nfm", "NOAA/Meteor APT"),
-    Preset("2m SSB", 144_200_000, "usb", "SSB calling"),
-    Preset("2m FM", 146_520_000, "nfm", "FM simplex"),
-    Preset("Marine 16", 156_800_000, "nfm", "distress & calling"),
-    Preset("NOAA WX-1", 162_550_000, "nfm", "weather, most areas"),
+    Preset("Air guard", 121_500_000, "am", "121.5 emergency",
+           group="Aviation"),
+    Preset("Air UNICOM", 122_800_000, "am", "UNICOM", group="Aviation"),
+    Preset("Air air-to-air", 123_450_000, "am", "air-to-air",
+           group="Aviation"),
+    # Marine and weather -- the channels that mean the same thing wherever you
+    # are, and the satellites above the airband.
+    Preset("Marine 16", 156_800_000, "nfm", "distress & calling",
+           group="Marine"),
+    Preset("Weather APT", 137_100_000, "nfm", "NOAA/Meteor APT",
+           group="Weather"),
+    Preset("NOAA WX-1", 162_550_000, "nfm", "weather, most areas",
+           group="Weather"),
 ]
+
+
+def presets_by_group() -> list[tuple[str, list[Preset]]]:
+    """The presets as the menu's sections, in reading order.
+
+    A section with nothing in it is left out rather than drawn as an empty
+    heading: every line in the menu should be something to tune to.
+    """
+    sections: list[tuple[str, list[Preset]]] = []
+    for name in PRESET_GROUPS:
+        items = [p for p in PRESETS if p.group == name]
+        if items:
+            sections.append((name, items))
+    return sections
 
 
 def bands_in_view(lo: float, hi: float) -> list[Band]:

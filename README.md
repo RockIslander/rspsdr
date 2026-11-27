@@ -123,7 +123,7 @@ The radio starts automatically when the window opens.
 | `‹` `›` over the waterfall | page the view left / right by half a window |
 | `◀` `▶` buttons, or the dial box itself | step / type a frequency |
 | **Jump to band…** | 160 m … 70 cm, every shortwave metre band, and the VHF/UHF service bands |
-| **Presets…** | WWV/CHU time, FT8 & WSPR calling, broadcasts, airband, weather satellites, marine and NOAA weather |
+| **Presets…** | grouped into Ham, Time, Broadcast, Utility, Aviation, Marine and Weather: FT8 & WSPR calling, WWV/CHU time, broadcasts, airband, weather satellites, marine and NOAA weather |
 | **Centre** box, in Settings | move the received window without changing where you listen |
 
 Clicking or tuning near the edge of the window re-centres the receiver
