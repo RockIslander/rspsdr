@@ -1,8 +1,9 @@
-"""Band plan and tuning presets for HF, shortwave and the VHF airband.
+"""Band plan and tuning presets for HF, shortwave and VHF.
 
 Ham segments follow the IARU Region 2 plan (the Americas), which is what is
 relevant for a receiver in North America.  Shortwave broadcast bands are the
-standard metre bands.
+standard metre bands.  The VHF blocks name the service a listener finds there
+rather than listing every channel, which no band plan could keep up with.
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ HAM_BANDS: list[Band] = [
     Band("12m", 24_890_000, 24_990_000, "usb", "day"),
     Band("10m", 28_000_000, 29_700_000, "usb", "day, Es"),
     Band("6m", 50_000_000, 54_000_000, "usb", "sporadic E"),
+    Band("2m", 144_000_000, 148_000_000, "nfm", "FM & SSB"),
 ]
 
 # --- shortwave broadcast (metre bands) ---------------------------------
@@ -64,8 +66,27 @@ AIR_BANDS: list[Band] = [
     Band("Air band", 118_000_000, 137_000_000, "am", "voice"),
 ]
 
+# --- the rest of VHF: 137-174 MHz -------------------------------------
+# Just above the airband are the weather satellites' APT downlinks, NOAA and
+# Meteor on 137.1-137.9; 144-148 is the 2 m amateur band, which sits in
+# HAM_BANDS with the others.  The rest is land mobile on 12.5 kHz channels:
+# public safety, business radio, the marine channels and the seven NOAA
+# weather channels, which are worth naming because they are the same
+# everywhere rather than field by field.
+VHF_BANDS: list[Band] = [
+    Band("Weather sat", 137_000_000, 138_000_000, "nfm", "NOAA APT"),
+    Band("Public safety", 138_000_000, 144_000_000, "nfm",
+         "police, fire, business"),
+    Band("Land mobile", 148_000_000, 156_000_000, "nfm", "12.5 kHz"),
+    Band("Marine VHF", 156_000_000, 162_050_000, "nfm",
+         "ch 16 = 156.800"),
+    Band("NOAA weather", 162_400_000, 162_550_000, "nfm", "7 channels"),
+    Band("Government", 162_550_000, 173_400_000, "nfm",
+         "federal, business"),
+]
+
 # Everything the two lookups below search, in one place.
-ALL_BANDS: list[Band] = HAM_BANDS + SW_BANDS + AIR_BANDS
+ALL_BANDS: list[Band] = HAM_BANDS + SW_BANDS + AIR_BANDS + VHF_BANDS
 
 # The 8.33 kHz channels of the European airband are each 25 kHz channel cut in
 # three, so they sit 25000/3 Hz apart: 118.000, 118.008333, 118.016667,
@@ -128,6 +149,13 @@ PRESETS: list[Preset] = [
     Preset("Air guard", 121_500_000, "am", "121.5 emergency"),
     Preset("Air UNICOM", 122_800_000, "am", "UNICOM"),
     Preset("Air air-to-air", 123_450_000, "am", "air-to-air"),
+    # VHF above the airband -- the satellites, 2 m, and the marine and weather
+    # channels that mean the same thing wherever you are.
+    Preset("Weather APT", 137_100_000, "nfm", "NOAA/Meteor APT"),
+    Preset("2m SSB", 144_200_000, "usb", "SSB calling"),
+    Preset("2m FM", 146_520_000, "nfm", "FM simplex"),
+    Preset("Marine 16", 156_800_000, "nfm", "distress & calling"),
+    Preset("NOAA WX-1", 162_550_000, "nfm", "weather, most areas"),
 ]
 
 

@@ -431,13 +431,23 @@ def main() -> int:
               and abs(win.settings.tuned_freq - 14_175_000) < 500_000,
               f"{win.settings.tuned_freq/1e6:.6f} MHz, mode {win.radio.demod.mode}")
 
-        # ... and the airband, which is the only band above 6 m in the list.
+        # ... and the airband, the start of the VHF blocks.
         idx = next(i for i in range(win.cmb_band.count())
                    if getattr(win.cmb_band.itemData(i), "name", None) == "Air band")
         win.cmb_band.setCurrentIndex(idx)
         check("the airband is in the band list, and jumps to its middle in AM",
               abs(win.settings.tuned_freq - 127_500_000) < 1.0
               and win.settings.mode == "am",
+              f"{win.settings.tuned_freq/1e6:.6f} MHz, mode {win.settings.mode}")
+
+        # ... and 2 m, which is the top of the ham list and most of the
+        # listening anybody does above the airband.
+        idx = next(i for i in range(win.cmb_band.count())
+                   if getattr(win.cmb_band.itemData(i), "name", None) == "2m")
+        win.cmb_band.setCurrentIndex(idx)
+        check("the 2 m band is in the list, and jumps to its middle in FM",
+              abs(win.settings.tuned_freq - 146_000_000) < 1.0
+              and win.settings.mode == "nfm",
               f"{win.settings.tuned_freq/1e6:.6f} MHz, mode {win.settings.mode}")
 
         win.spn_center.setValue(14_200_000 / 1e6)

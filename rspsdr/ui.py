@@ -2311,6 +2311,9 @@ class MainWindow(QMainWindow):
         self.cmb_band.insertSeparator(self.cmb_band.count())
         for bd in bands.AIR_BANDS:
             self.cmb_band.addItem(f"{bd.name}   ({bd.note})", bd)
+        self.cmb_band.insertSeparator(self.cmb_band.count())
+        for bd in bands.VHF_BANDS:
+            self.cmb_band.addItem(f"{bd.name}   ({bd.note})", bd)
         lay.addWidget(self.cmb_band)
 
         self.cmb_preset = QComboBox()

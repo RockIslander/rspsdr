@@ -1012,6 +1012,33 @@ check("airband presets are 25 kHz channels inside the airband, in AM",
               and getattr(bands.find_band(p.freq), "name", "").startswith("Air ")
               for p in air_presets),
       ", ".join(f"{p.name} {p.freq/1e6:.3f}" for p in air_presets))
+vhf_blocks = sorted(bands.VHF_BANDS
+                    + [b for b in bands.HAM_BANDS if b.name == "2m"],
+                    key=lambda b: b.low)
+check("VHF 137-174 is split into its services, in order and not overlapping",
+      [b.name for b in vhf_blocks]
+      == ["Weather sat", "Public safety", "2m", "Land mobile",
+          "Marine VHF", "NOAA weather", "Government"]
+      and all(a.high <= b.low for a, b in zip(vhf_blocks, vhf_blocks[1:])),
+      ", ".join(f"{b.name} {b.low/1e6:g}-{b.high/1e6:g}"
+                for b in vhf_blocks))
+check("a frequency in each of them is named by it",
+      [(f, bands.find_band(f).name) for f in
+       (137_500_000, 140_000_000, 146_520_000, 152_000_000, 156_800_000,
+        162_475_000, 165_000_000)]
+      == [(137_500_000, "Weather sat"), (140_000_000, "Public safety"),
+          (146_520_000, "2m"), (152_000_000, "Land mobile"),
+          (156_800_000, "Marine VHF"), (162_475_000, "NOAA weather"),
+          (165_000_000, "Government")],
+      ", ".join(f"{f/1e6:.3f} {bands.find_band(f).name}"
+                for f in (137_500_000, 140_000_000, 146_520_000,
+                          152_000_000, 156_800_000, 162_475_000, 165_000_000)))
+vhf_presets = [p for p in bands.PRESETS if p.freq >= 137_000_000]
+check("the VHF presets sit in a VHF band, in a mode that band uses",
+      len(vhf_presets) >= 5
+      and all(bands.find_band(p.freq) is not None
+              and p.mode in ("nfm", "usb") for p in vhf_presets),
+      ", ".join(f"{p.name} {p.freq/1e6:.3f}" for p in vhf_presets))
 check("three 8.33 kHz steps climb a 25 kHz channel exactly",
       [bands.next_narrow_channel(f, 1)
        for f in (118_000_000, 118_008_333, 118_016_667)]
